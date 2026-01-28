@@ -17368,14 +17368,8 @@ static mut unicode_comp_table: [uint16_t; 965] = [
     0x92c0 as core::ffi::c_int as uint16_t,
     0x92c2 as core::ffi::c_int as uint16_t,
 ];
-static mut unicode_gc_name_table: [core::ffi::c_char; 660] = unsafe {
-    ::core::mem::transmute::<
-        [u8; 660],
-        [core::ffi::c_char; 660],
-    >(
-        *b"Cn,Unassigned\0Lu,Uppercase_Letter\0Ll,Lowercase_Letter\0Lt,Titlecase_Letter\0Lm,Modifier_Letter\0Lo,Other_Letter\0Mn,Nonspacing_Mark\0Mc,Spacing_Mark\0Me,Enclosing_Mark\0Nd,Decimal_Number,digit\0Nl,Letter_Number\0No,Other_Number\0Sm,Math_Symbol\0Sc,Currency_Symbol\0Sk,Modifier_Symbol\0So,Other_Symbol\0Pc,Connector_Punctuation\0Pd,Dash_Punctuation\0Ps,Open_Punctuation\0Pe,Close_Punctuation\0Pi,Initial_Punctuation\0Pf,Final_Punctuation\0Po,Other_Punctuation\0Zs,Space_Separator\0Zl,Line_Separator\0Zp,Paragraph_Separator\0Cc,Control,cntrl\0Cf,Format\0Cs,Surrogate\0Co,Private_Use\0LC,Cased_Letter\0L,Letter\0M,Mark,Combining_Mark\0N,Number\0S,Symbol\0P,Punctuation,punct\0Z,Separator\0C,Other\0\0",
-    )
-};
+static unicode_gc_name_table: [u8; 660] =
+    *b"Cn,Unassigned\0Lu,Uppercase_Letter\0Ll,Lowercase_Letter\0Lt,Titlecase_Letter\0Lm,Modifier_Letter\0Lo,Other_Letter\0Mn,Nonspacing_Mark\0Mc,Spacing_Mark\0Me,Enclosing_Mark\0Nd,Decimal_Number,digit\0Nl,Letter_Number\0No,Other_Number\0Sm,Math_Symbol\0Sc,Currency_Symbol\0Sk,Modifier_Symbol\0So,Other_Symbol\0Pc,Connector_Punctuation\0Pd,Dash_Punctuation\0Ps,Open_Punctuation\0Pe,Close_Punctuation\0Pi,Initial_Punctuation\0Pf,Final_Punctuation\0Po,Other_Punctuation\0Zs,Space_Separator\0Zl,Line_Separator\0Zp,Paragraph_Separator\0Cc,Control,cntrl\0Cf,Format\0Cs,Surrogate\0Co,Private_Use\0LC,Cased_Letter\0L,Letter\0M,Mark,Combining_Mark\0N,Number\0S,Symbol\0P,Punctuation,punct\0Z,Separator\0C,Other\0\0";
 static mut unicode_gc_table: [uint8_t; 4122] = [
     0xfa as core::ffi::c_int as uint8_t,
     0x18 as core::ffi::c_int as uint8_t,
@@ -21500,14 +21494,8 @@ static mut unicode_gc_table: [uint8_t; 4122] = [
     0x76 as core::ffi::c_int as uint8_t,
     0x20 as core::ffi::c_int as uint8_t,
 ];
-static mut unicode_script_name_table: [core::ffi::c_char; 2572] = unsafe {
-    ::core::mem::transmute::<
-        [u8; 2572],
-        [core::ffi::c_char; 2572],
-    >(
-        *b"Unknown,Zzzz\0Adlam,Adlm\0Ahom,Ahom\0Anatolian_Hieroglyphs,Hluw\0Arabic,Arab\0Armenian,Armn\0Avestan,Avst\0Balinese,Bali\0Bamum,Bamu\0Bassa_Vah,Bass\0Batak,Batk\0Beria_Erfe,Berf\0Bengali,Beng\0Bhaiksuki,Bhks\0Bopomofo,Bopo\0Brahmi,Brah\0Braille,Brai\0Buginese,Bugi\0Buhid,Buhd\0Canadian_Aboriginal,Cans\0Carian,Cari\0Caucasian_Albanian,Aghb\0Chakma,Cakm\0Cham,Cham\0Cherokee,Cher\0Chorasmian,Chrs\0Common,Zyyy\0Coptic,Copt,Qaac\0Cuneiform,Xsux\0Cypriot,Cprt\0Cyrillic,Cyrl\0Cypro_Minoan,Cpmn\0Deseret,Dsrt\0Devanagari,Deva\0Dives_Akuru,Diak\0Dogra,Dogr\0Duployan,Dupl\0Egyptian_Hieroglyphs,Egyp\0Elbasan,Elba\0Elymaic,Elym\0Ethiopic,Ethi\0Garay,Gara\0Georgian,Geor\0Glagolitic,Glag\0Gothic,Goth\0Grantha,Gran\0Greek,Grek\0Gujarati,Gujr\0Gunjala_Gondi,Gong\0Gurmukhi,Guru\0Gurung_Khema,Gukh\0Han,Hani\0Hangul,Hang\0Hanifi_Rohingya,Rohg\0Hanunoo,Hano\0Hatran,Hatr\0Hebrew,Hebr\0Hiragana,Hira\0Imperial_Aramaic,Armi\0Inherited,Zinh,Qaai\0Inscriptional_Pahlavi,Phli\0Inscriptional_Parthian,Prti\0Javanese,Java\0Kaithi,Kthi\0Kannada,Knda\0Katakana,Kana\0Katakana_Or_Hiragana,Hrkt\0Kawi,Kawi\0Kayah_Li,Kali\0Kharoshthi,Khar\0Khmer,Khmr\0Khojki,Khoj\0Khitan_Small_Script,Kits\0Khudawadi,Sind\0Kirat_Rai,Krai\0Lao,Laoo\0Latin,Latn\0Lepcha,Lepc\0Limbu,Limb\0Linear_A,Lina\0Linear_B,Linb\0Lisu,Lisu\0Lycian,Lyci\0Lydian,Lydi\0Makasar,Maka\0Mahajani,Mahj\0Malayalam,Mlym\0Mandaic,Mand\0Manichaean,Mani\0Marchen,Marc\0Masaram_Gondi,Gonm\0Medefaidrin,Medf\0Meetei_Mayek,Mtei\0Mende_Kikakui,Mend\0Meroitic_Cursive,Merc\0Meroitic_Hieroglyphs,Mero\0Miao,Plrd\0Modi,Modi\0Mongolian,Mong\0Mro,Mroo\0Multani,Mult\0Myanmar,Mymr\0Nabataean,Nbat\0Nag_Mundari,Nagm\0Nandinagari,Nand\0New_Tai_Lue,Talu\0Newa,Newa\0Nko,Nkoo\0Nushu,Nshu\0Nyiakeng_Puachue_Hmong,Hmnp\0Ogham,Ogam\0Ol_Chiki,Olck\0Ol_Onal,Onao\0Old_Hungarian,Hung\0Old_Italic,Ital\0Old_North_Arabian,Narb\0Old_Permic,Perm\0Old_Persian,Xpeo\0Old_Sogdian,Sogo\0Old_South_Arabian,Sarb\0Old_Turkic,Orkh\0Old_Uyghur,Ougr\0Oriya,Orya\0Osage,Osge\0Osmanya,Osma\0Pahawh_Hmong,Hmng\0Palmyrene,Palm\0Pau_Cin_Hau,Pauc\0Phags_Pa,Phag\0Phoenician,Phnx\0Psalter_Pahlavi,Phlp\0Rejang,Rjng\0Runic,Runr\0Samaritan,Samr\0Saurashtra,Saur\0Sharada,Shrd\0Shavian,Shaw\0Siddham,Sidd\0Sidetic,Sidt\0SignWriting,Sgnw\0Sinhala,Sinh\0Sogdian,Sogd\0Sora_Sompeng,Sora\0Soyombo,Soyo\0Sundanese,Sund\0Sunuwar,Sunu\0Syloti_Nagri,Sylo\0Syriac,Syrc\0Tagalog,Tglg\0Tagbanwa,Tagb\0Tai_Le,Tale\0Tai_Tham,Lana\0Tai_Viet,Tavt\0Tai_Yo,Tayo\0Takri,Takr\0Tamil,Taml\0Tangut,Tang\0Telugu,Telu\0Thaana,Thaa\0Thai,Thai\0Tibetan,Tibt\0Tifinagh,Tfng\0Tirhuta,Tirh\0Tangsa,Tnsa\0Todhri,Todr\0Tolong_Siki,Tols\0Toto,Toto\0Tulu_Tigalari,Tutg\0Ugaritic,Ugar\0Vai,Vaii\0Vithkuqi,Vith\0Wancho,Wcho\0Warang_Citi,Wara\0Yezidi,Yezi\0Yi,Yiii\0Zanabazar_Square,Zanb\0\0",
-    )
-};
+static unicode_script_name_table: [u8; 2572] =
+    *b"Unknown,Zzzz\0Adlam,Adlm\0Ahom,Ahom\0Anatolian_Hieroglyphs,Hluw\0Arabic,Arab\0Armenian,Armn\0Avestan,Avst\0Balinese,Bali\0Bamum,Bamu\0Bassa_Vah,Bass\0Batak,Batk\0Beria_Erfe,Berf\0Bengali,Beng\0Bhaiksuki,Bhks\0Bopomofo,Bopo\0Brahmi,Brah\0Braille,Brai\0Buginese,Bugi\0Buhid,Buhd\0Canadian_Aboriginal,Cans\0Carian,Cari\0Caucasian_Albanian,Aghb\0Chakma,Cakm\0Cham,Cham\0Cherokee,Cher\0Chorasmian,Chrs\0Common,Zyyy\0Coptic,Copt,Qaac\0Cuneiform,Xsux\0Cypriot,Cprt\0Cyrillic,Cyrl\0Cypro_Minoan,Cpmn\0Deseret,Dsrt\0Devanagari,Deva\0Dives_Akuru,Diak\0Dogra,Dogr\0Duployan,Dupl\0Egyptian_Hieroglyphs,Egyp\0Elbasan,Elba\0Elymaic,Elym\0Ethiopic,Ethi\0Garay,Gara\0Georgian,Geor\0Glagolitic,Glag\0Gothic,Goth\0Grantha,Gran\0Greek,Grek\0Gujarati,Gujr\0Gunjala_Gondi,Gong\0Gurmukhi,Guru\0Gurung_Khema,Gukh\0Han,Hani\0Hangul,Hang\0Hanifi_Rohingya,Rohg\0Hanunoo,Hano\0Hatran,Hatr\0Hebrew,Hebr\0Hiragana,Hira\0Imperial_Aramaic,Armi\0Inherited,Zinh,Qaai\0Inscriptional_Pahlavi,Phli\0Inscriptional_Parthian,Prti\0Javanese,Java\0Kaithi,Kthi\0Kannada,Knda\0Katakana,Kana\0Katakana_Or_Hiragana,Hrkt\0Kawi,Kawi\0Kayah_Li,Kali\0Kharoshthi,Khar\0Khmer,Khmr\0Khojki,Khoj\0Khitan_Small_Script,Kits\0Khudawadi,Sind\0Kirat_Rai,Krai\0Lao,Laoo\0Latin,Latn\0Lepcha,Lepc\0Limbu,Limb\0Linear_A,Lina\0Linear_B,Linb\0Lisu,Lisu\0Lycian,Lyci\0Lydian,Lydi\0Makasar,Maka\0Mahajani,Mahj\0Malayalam,Mlym\0Mandaic,Mand\0Manichaean,Mani\0Marchen,Marc\0Masaram_Gondi,Gonm\0Medefaidrin,Medf\0Meetei_Mayek,Mtei\0Mende_Kikakui,Mend\0Meroitic_Cursive,Merc\0Meroitic_Hieroglyphs,Mero\0Miao,Plrd\0Modi,Modi\0Mongolian,Mong\0Mro,Mroo\0Multani,Mult\0Myanmar,Mymr\0Nabataean,Nbat\0Nag_Mundari,Nagm\0Nandinagari,Nand\0New_Tai_Lue,Talu\0Newa,Newa\0Nko,Nkoo\0Nushu,Nshu\0Nyiakeng_Puachue_Hmong,Hmnp\0Ogham,Ogam\0Ol_Chiki,Olck\0Ol_Onal,Onao\0Old_Hungarian,Hung\0Old_Italic,Ital\0Old_North_Arabian,Narb\0Old_Permic,Perm\0Old_Persian,Xpeo\0Old_Sogdian,Sogo\0Old_South_Arabian,Sarb\0Old_Turkic,Orkh\0Old_Uyghur,Ougr\0Oriya,Orya\0Osage,Osge\0Osmanya,Osma\0Pahawh_Hmong,Hmng\0Palmyrene,Palm\0Pau_Cin_Hau,Pauc\0Phags_Pa,Phag\0Phoenician,Phnx\0Psalter_Pahlavi,Phlp\0Rejang,Rjng\0Runic,Runr\0Samaritan,Samr\0Saurashtra,Saur\0Sharada,Shrd\0Shavian,Shaw\0Siddham,Sidd\0Sidetic,Sidt\0SignWriting,Sgnw\0Sinhala,Sinh\0Sogdian,Sogd\0Sora_Sompeng,Sora\0Soyombo,Soyo\0Sundanese,Sund\0Sunuwar,Sunu\0Syloti_Nagri,Sylo\0Syriac,Syrc\0Tagalog,Tglg\0Tagbanwa,Tagb\0Tai_Le,Tale\0Tai_Tham,Lana\0Tai_Viet,Tavt\0Tai_Yo,Tayo\0Takri,Takr\0Tamil,Taml\0Tangut,Tang\0Telugu,Telu\0Thaana,Thaa\0Thai,Thai\0Tibetan,Tibt\0Tifinagh,Tfng\0Tirhuta,Tirh\0Tangsa,Tnsa\0Todhri,Todr\0Tolong_Siki,Tols\0Toto,Toto\0Tulu_Tigalari,Tutg\0Ugaritic,Ugar\0Vai,Vaii\0Vithkuqi,Vith\0Wancho,Wcho\0Warang_Citi,Wara\0Yezidi,Yezi\0Yi,Yiii\0Zanabazar_Square,Zanb\0\0";
 static mut unicode_script_table: [uint8_t; 2818] = [
     0xc0 as core::ffi::c_int as uint8_t,
     0x1a as core::ffi::c_int as uint8_t,
@@ -30339,15 +30327,11 @@ static mut unicode_prop_Default_Ignorable_Code_Point_table: [uint8_t; 51] = [
     0x4f as core::ffi::c_int as uint8_t,
     0xff as core::ffi::c_int as uint8_t,
 ];
-static mut unicode_prop_name_table: [core::ffi::c_char; 1144] = unsafe {
-    ::core::mem::transmute::<
-        [u8; 1144],
-        [core::ffi::c_char; 1144],
-    >(
-        *b"ASCII_Hex_Digit,AHex\0Bidi_Control,Bidi_C\0Dash\0Deprecated,Dep\0Diacritic,Dia\0Extender,Ext\0Hex_Digit,Hex\0IDS_Unary_Operator,IDSU\0IDS_Binary_Operator,IDSB\0IDS_Trinary_Operator,IDST\0Ideographic,Ideo\0Join_Control,Join_C\0Logical_Order_Exception,LOE\0Modifier_Combining_Mark,MCM\0Noncharacter_Code_Point,NChar\0Pattern_Syntax,Pat_Syn\0Pattern_White_Space,Pat_WS\0Quotation_Mark,QMark\0Radical\0Regional_Indicator,RI\0Sentence_Terminal,STerm\0Soft_Dotted,SD\0Terminal_Punctuation,Term\0Unified_Ideograph,UIdeo\0Variation_Selector,VS\0White_Space,space\0Bidi_Mirrored,Bidi_M\0Emoji\0Emoji_Component,EComp\0Emoji_Modifier,EMod\0Emoji_Modifier_Base,EBase\0Emoji_Presentation,EPres\0Extended_Pictographic,ExtPict\0Default_Ignorable_Code_Point,DI\0ID_Start,IDS\0Case_Ignorable,CI\0ASCII\0Alphabetic,Alpha\0Any\0Assigned\0Cased\0Changes_When_Casefolded,CWCF\0Changes_When_Casemapped,CWCM\0Changes_When_Lowercased,CWL\0Changes_When_NFKC_Casefolded,CWKCF\0Changes_When_Titlecased,CWT\0Changes_When_Uppercased,CWU\0Grapheme_Base,Gr_Base\0Grapheme_Extend,Gr_Ext\0ID_Continue,IDC\0ID_Compat_Math_Start\0ID_Compat_Math_Continue\0InCB\0Lowercase,Lower\0Math\0Uppercase,Upper\0XID_Continue,XIDC\0XID_Start,XIDS\0\0",
-    )
-};
-static mut unicode_prop_table: [*const uint8_t; 57] = unsafe {
+static unicode_prop_name_table: [u8; 1144] =
+    *b"ASCII_Hex_Digit,AHex\0Bidi_Control,Bidi_C\0Dash\0Deprecated,Dep\0Diacritic,Dia\0Extender,Ext\0Hex_Digit,Hex\0IDS_Unary_Operator,IDSU\0IDS_Binary_Operator,IDSB\0IDS_Trinary_Operator,IDST\0Ideographic,Ideo\0Join_Control,Join_C\0Logical_Order_Exception,LOE\0Modifier_Combining_Mark,MCM\0Noncharacter_Code_Point,NChar\0Pattern_Syntax,Pat_Syn\0Pattern_White_Space,Pat_WS\0Quotation_Mark,QMark\0Radical\0Regional_Indicator,RI\0Sentence_Terminal,STerm\0Soft_Dotted,SD\0Terminal_Punctuation,Term\0Unified_Ideograph,UIdeo\0Variation_Selector,VS\0White_Space,space\0Bidi_Mirrored,Bidi_M\0Emoji\0Emoji_Component,EComp\0Emoji_Modifier,EMod\0Emoji_Modifier_Base,EBase\0Emoji_Presentation,EPres\0Extended_Pictographic,ExtPict\0Default_Ignorable_Code_Point,DI\0ID_Start,IDS\0Case_Ignorable,CI\0ASCII\0Alphabetic,Alpha\0Any\0Assigned\0Cased\0Changes_When_Casefolded,CWCF\0Changes_When_Casemapped,CWCM\0Changes_When_Lowercased,CWL\0Changes_When_NFKC_Casefolded,CWKCF\0Changes_When_Titlecased,CWT\0Changes_When_Uppercased,CWU\0Grapheme_Base,Gr_Base\0Grapheme_Extend,Gr_Ext\0ID_Continue,IDC\0ID_Compat_Math_Start\0ID_Compat_Math_Continue\0InCB\0Lowercase,Lower\0Math\0Uppercase,Upper\0XID_Continue,XIDC\0XID_Start,XIDS\0\0";
+// Runtime function to avoid static initialization order issues
+#[inline]
+unsafe fn get_unicode_prop_table() -> [*const uint8_t; 57] {
     [
         unicode_prop_Hyphen_table.as_ptr(),
         unicode_prop_Other_Math_table.as_ptr(),
@@ -30407,16 +30391,14 @@ static mut unicode_prop_table: [*const uint8_t; 57] = unsafe {
         unicode_prop_ID_Start_table.as_ptr(),
         unicode_prop_Case_Ignorable_table.as_ptr(),
     ]
-};
-static mut unicode_prop_len_table: [uint16_t; 57] = [0; 57];
-static mut unicode_sequence_prop_name_table: [core::ffi::c_char; 143] = unsafe {
-    ::core::mem::transmute::<
-        [u8; 143],
-        [core::ffi::c_char; 143],
-    >(
-        *b"Basic_Emoji\0Emoji_Keycap_Sequence\0RGI_Emoji_Modifier_Sequence\0RGI_Emoji_Flag_Sequence\0RGI_Emoji_Tag_Sequence\0RGI_Emoji_ZWJ_Sequence\0RGI_Emoji\0\0",
-    )
-};
+}
+static unicode_prop_len_table: [uint16_t; 57] = [
+    28, 200, 452, 68, 15, 112, 32, 11, 22, 19, 708, 31, 23, 22, 29, 449, 144, 183, 72, 128,
+    4, 5, 10, 58, 23, 447, 116, 12, 4, 8, 4, 71, 4, 15, 16, 71, 58, 11, 31, 9, 4, 213, 79,
+    264, 46, 13, 22, 173, 239, 28, 4, 71, 145, 254, 51, 1146, 785,
+];
+static unicode_sequence_prop_name_table: [u8; 143] =
+    *b"Basic_Emoji\0Emoji_Keycap_Sequence\0RGI_Emoji_Modifier_Sequence\0RGI_Emoji_Flag_Sequence\0RGI_Emoji_Tag_Sequence\0RGI_Emoji_ZWJ_Sequence\0RGI_Emoji\0\0";
 static mut unicode_rgi_emoji_tag_sequence: [uint8_t; 18] = [
     0x67 as core::ffi::c_int as uint8_t,
     0x62 as core::ffi::c_int as uint8_t,
@@ -34750,7 +34732,7 @@ pub unsafe extern "C" fn unicode_script(
     };
     let mut cr2: *mut CharRange = &mut cr2_s;
     let mut is_common: BOOL = 0;
-    script_idx = unicode_find_name(unicode_script_name_table.as_ptr(), script_name);
+    script_idx = unicode_find_name(unicode_script_name_table.as_ptr() as *const core::ffi::c_char, script_name);
     if script_idx < 0 as core::ffi::c_int {
         return -(2 as core::ffi::c_int);
     }
@@ -35104,7 +35086,7 @@ unsafe extern "C" fn unicode_prop1(
     let mut c0: uint32_t = 0;
     let mut b: uint32_t = 0;
     let mut bit: uint32_t = 0;
-    p = unicode_prop_table[prop_idx as usize];
+    p = get_unicode_prop_table()[prop_idx as usize];
     p_end = p
         .offset(unicode_prop_len_table[prop_idx as usize] as core::ffi::c_int as isize);
     c = 0 as uint32_t;
@@ -35217,7 +35199,7 @@ pub unsafe extern "C" fn unicode_general_category(
 ) -> core::ffi::c_int {
     let mut gc_idx: core::ffi::c_int = 0;
     let mut gc_mask: uint32_t = 0;
-    gc_idx = unicode_find_name(unicode_gc_name_table.as_ptr(), gc_name);
+    gc_idx = unicode_find_name(unicode_gc_name_table.as_ptr() as *const core::ffi::c_char, gc_name);
     if gc_idx < 0 as core::ffi::c_int {
         return -(2 as core::ffi::c_int);
     }
@@ -35236,7 +35218,7 @@ pub unsafe extern "C" fn unicode_prop(
 ) -> core::ffi::c_int {
     let mut prop_idx: core::ffi::c_int = 0;
     let mut ret: core::ffi::c_int = 0;
-    prop_idx = unicode_find_name(unicode_prop_name_table.as_ptr(), prop_name);
+    prop_idx = unicode_find_name(unicode_prop_name_table.as_ptr() as *const core::ffi::c_char, prop_name);
     if prop_idx < 0 as core::ffi::c_int {
         return -(2 as core::ffi::c_int);
     }
@@ -36177,7 +36159,7 @@ pub unsafe extern "C" fn unicode_sequence_prop(
 ) -> core::ffi::c_int {
     let mut seq_prop_idx: core::ffi::c_int = 0;
     seq_prop_idx = unicode_find_name(
-        unicode_sequence_prop_name_table.as_ptr(),
+        unicode_sequence_prop_name_table.as_ptr() as *const core::ffi::c_char,
         prop_name,
     );
     if seq_prop_idx < 0 as core::ffi::c_int {
@@ -36185,126 +36167,3 @@ pub unsafe extern "C" fn unicode_sequence_prop(
     }
     return unicode_sequence_prop1(seq_prop_idx, cb, opaque, cr);
 }
-unsafe extern "C" fn run_static_initializers() {
-    unicode_prop_len_table = [
-        (::core::mem::size_of::<[uint8_t; 28]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 200]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 452]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 68]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 15]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 112]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 32]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 11]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 22]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 19]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 708]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 31]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 23]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 22]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 29]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 449]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 144]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 183]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 72]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 128]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 4]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 5]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 10]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 58]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 23]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 447]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 116]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 12]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 4]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 8]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 4]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 71]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 4]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 15]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 16]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 71]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 58]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 11]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 31]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 9]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 4]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 213]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 79]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 264]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 46]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 13]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 22]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 173]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 239]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 28]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 4]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 71]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 145]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 254]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 51]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 1146]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-        (::core::mem::size_of::<[uint8_t; 785]>() as usize)
-            .wrapping_div(::core::mem::size_of::<uint8_t>() as usize) as uint16_t,
-    ];
-}
-#[used]
-#[cfg_attr(target_os = "linux", link_section = ".init_array")]
-#[cfg_attr(target_os = "windows", link_section = ".CRT$XIB")]
-#[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
-static INIT_ARRAY: [unsafe extern "C" fn(); 1] = [run_static_initializers];

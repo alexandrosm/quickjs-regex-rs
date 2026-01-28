@@ -96,13 +96,19 @@ impl Regex {
         let mut error_msg = [0i8; 128];
         let mut bytecode_len: i32 = 0;
 
+        // Create a null-terminated copy of the pattern.
+        // The lre_compile function expects the buffer to be null-terminated
+        // for proper end-of-pattern detection.
+        let mut pattern_buf: Vec<u8> = pattern.as_bytes().to_vec();
+        pattern_buf.push(0);
+
         let bytecode = unsafe {
             libregexp::lre_compile(
                 &mut bytecode_len,
                 error_msg.as_mut_ptr(),
                 error_msg.len() as i32,
-                pattern.as_ptr() as *const i8,
-                pattern.len(),
+                pattern_buf.as_ptr() as *const i8,
+                pattern.len(),  // Original length without null terminator
                 flags.bits() as i32,
                 ptr::null_mut(),
             )

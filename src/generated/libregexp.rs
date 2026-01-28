@@ -1192,13 +1192,16 @@ unsafe extern "C" fn re_parse_error(
     mut fmt: *const core::ffi::c_char,
     mut _args: ...
 ) -> core::ffi::c_int {
-    // Set a generic error message instead of formatted one
-    let msg = b"regex parse error\0";
+    // Copy the format string as-is (better than nothing)
     let dst = ((*s).u.error_msg).as_mut_ptr();
-    for (i, &byte) in msg.iter().enumerate() {
-        if i >= 127 { break; }
-        *dst.add(i) = byte as core::ffi::c_char;
+    let mut i = 0;
+    let mut p = fmt;
+    while i < 126 && *p != 0 {
+        *dst.add(i) = *p;
+        i += 1;
+        p = p.add(1);
     }
+    *dst.add(i) = 0;
     return -(1 as core::ffi::c_int);
 }
 unsafe extern "C" fn re_parse_out_of_memory(
