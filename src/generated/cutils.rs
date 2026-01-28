@@ -1,3 +1,40 @@
+// C runtime callback implementations needed by the generated code
+
+/// C assert failure - panics with the assertion message
+#[no_mangle]
+pub unsafe extern "C" fn __assert_fail(
+    assertion: *const core::ffi::c_char,
+    file: *const core::ffi::c_char,
+    line: core::ffi::c_uint,
+    function: *const core::ffi::c_char,
+) {
+    let assertion = if assertion.is_null() {
+        "<unknown assertion>"
+    } else {
+        std::ffi::CStr::from_ptr(assertion).to_str().unwrap_or("<invalid>")
+    };
+    let file = if file.is_null() {
+        "<unknown file>"
+    } else {
+        std::ffi::CStr::from_ptr(file).to_str().unwrap_or("<invalid>")
+    };
+    let function = if function.is_null() {
+        "<unknown function>"
+    } else {
+        std::ffi::CStr::from_ptr(function).to_str().unwrap_or("<invalid>")
+    };
+    panic!(
+        "Assertion failed: {}, function {}, file {}, line {}",
+        assertion, function, file, line
+    );
+}
+
+/// C abort function - terminates the process
+#[no_mangle]
+pub unsafe extern "C" fn abort() -> ! {
+    std::process::abort();
+}
+
 extern "C" {
     fn realloc(__ptr: *mut core::ffi::c_void, __size: size_t) -> *mut core::ffi::c_void;
     fn vsnprintf(

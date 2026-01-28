@@ -1,7 +1,11 @@
 use ::c2rust_bitfields;
 use c2rust_bitfields::BitfieldStruct;
+
+// Use abort and __assert_fail from cutils
+use super::cutils::abort;
+use super::cutils::__assert_fail;
+
 extern "C" {
-    fn abort() -> !;
     fn vsnprintf(
         __s: *mut core::ffi::c_char,
         __maxlen: size_t,
@@ -33,12 +37,6 @@ extern "C" {
         __s2: *const core::ffi::c_char,
     ) -> core::ffi::c_int;
     fn strlen(__s: *const core::ffi::c_char) -> size_t;
-    fn __assert_fail(
-        __assertion: *const core::ffi::c_char,
-        __file: *const core::ffi::c_char,
-        __line: core::ffi::c_uint,
-        __function: *const core::ffi::c_char,
-    ) -> !;
     fn pstrcpy(
         buf: *mut core::ffi::c_char,
         buf_size: core::ffi::c_int,
@@ -1008,12 +1006,12 @@ unsafe extern "C" fn re_string_list_canonicalize(
     }
     return 0 as core::ffi::c_int;
 }
-static mut char_range_d: [uint16_t; 3] = [
+static char_range_d: [uint16_t; 3] = [
     1 as core::ffi::c_int as uint16_t,
     0x30 as core::ffi::c_int as uint16_t,
     (0x39 as core::ffi::c_int + 1 as core::ffi::c_int) as uint16_t,
 ];
-static mut char_range_s: [uint16_t; 21] = [
+static char_range_s: [uint16_t; 21] = [
     10 as core::ffi::c_int as uint16_t,
     0x9 as core::ffi::c_int as uint16_t,
     (0xd as core::ffi::c_int + 1 as core::ffi::c_int) as uint16_t,
@@ -1036,7 +1034,7 @@ static mut char_range_s: [uint16_t; 21] = [
     0xfeff as core::ffi::c_int as uint16_t,
     (0xfeff as core::ffi::c_int + 1 as core::ffi::c_int) as uint16_t,
 ];
-static mut char_range_w: [uint16_t; 9] = [
+static char_range_w: [uint16_t; 9] = [
     4 as core::ffi::c_int as uint16_t,
     0x30 as core::ffi::c_int as uint16_t,
     (0x39 as core::ffi::c_int + 1 as core::ffi::c_int) as uint16_t,
@@ -1048,9 +1046,18 @@ static mut char_range_w: [uint16_t; 9] = [
     (0x7a as core::ffi::c_int + 1 as core::ffi::c_int) as uint16_t,
 ];
 pub const CLASS_RANGE_BASE: core::ffi::c_int = 0x40000000 as core::ffi::c_int;
-static mut char_range_table: [*const uint16_t; 3] = unsafe {
-    [char_range_d.as_ptr(), char_range_s.as_ptr(), char_range_w.as_ptr()]
-};
+
+// Helper function to get char_range_table entry at runtime
+// This avoids the static initialization issues with pointers
+#[inline]
+unsafe fn get_char_range_table(idx: usize) -> *const uint16_t {
+    match idx {
+        0 => char_range_d.as_ptr(),
+        1 => char_range_s.as_ptr(),
+        2 => char_range_w.as_ptr(),
+        _ => core::ptr::null(),
+    }
+}
 unsafe extern "C" fn cr_init_char_range(
     mut s: *mut REParseState,
     mut cr: *mut REStringList,
@@ -1062,7 +1069,7 @@ unsafe extern "C" fn cr_init_char_range(
     let mut len: core::ffi::c_int = 0;
     let mut i: core::ffi::c_int = 0;
     invert = (c & 1 as uint32_t) as BOOL;
-    c_pt = char_range_table[(c >> 1 as core::ffi::c_int) as usize];
+    c_pt = get_char_range_table((c >> 1 as core::ffi::c_int) as usize);
     let fresh37 = c_pt;
     c_pt = c_pt.offset(1);
     len = *fresh37 as core::ffi::c_int;

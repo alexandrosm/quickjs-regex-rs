@@ -8,7 +8,7 @@
 // Required for c2rust generated code (temporary - will be removed during refinement)
 #![feature(c_variadic)]
 
-mod generated;
+pub mod generated;
 mod regex;
 
 // Re-export the public API

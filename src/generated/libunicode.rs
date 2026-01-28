@@ -1,6 +1,9 @@
+// Use abort and __assert_fail from cutils
+use super::cutils::abort;
+use super::cutils::__assert_fail;
+
 extern "C" {
     fn realloc(__ptr: *mut core::ffi::c_void, __size: size_t) -> *mut core::ffi::c_void;
-    fn abort() -> !;
     fn memcpy(
         __dest: *mut core::ffi::c_void,
         __src: *const core::ffi::c_void,
@@ -21,12 +24,6 @@ extern "C" {
         __c: core::ffi::c_int,
     ) -> *mut core::ffi::c_char;
     fn strlen(__s: *const core::ffi::c_char) -> size_t;
-    fn __assert_fail(
-        __assertion: *const core::ffi::c_char,
-        __file: *const core::ffi::c_char,
-        __line: core::ffi::c_uint,
-        __function: *const core::ffi::c_char,
-    ) -> !;
     fn dbuf_init2(
         s: *mut DynBuf,
         opaque: *mut core::ffi::c_void,
