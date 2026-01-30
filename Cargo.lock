@@ -351,6 +351,7 @@ dependencies = [
  "c2rust-bitfields",
  "criterion",
  "libc",
+ "memchr",
  "regress",
  "serde",
  "serde_json",

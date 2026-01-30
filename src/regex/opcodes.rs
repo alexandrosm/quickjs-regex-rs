@@ -153,17 +153,56 @@ impl OpCode {
 
     /// Convert from u8 to OpCode
     pub fn from_u8(value: u8) -> Option<Self> {
-        if value <= 44 {
-            // SAFETY: We've verified the value is in range
-            Some(unsafe { std::mem::transmute(value) })
-        } else {
-            None
+        match value {
+            0 => Some(OpCode::Invalid),
+            1 => Some(OpCode::Char),
+            2 => Some(OpCode::CharI),
+            3 => Some(OpCode::Char32),
+            4 => Some(OpCode::Char32I),
+            5 => Some(OpCode::Dot),
+            6 => Some(OpCode::Any),
+            7 => Some(OpCode::Space),
+            8 => Some(OpCode::NotSpace),
+            9 => Some(OpCode::LineStart),
+            10 => Some(OpCode::LineStartM),
+            11 => Some(OpCode::LineEnd),
+            12 => Some(OpCode::LineEndM),
+            13 => Some(OpCode::Goto),
+            14 => Some(OpCode::SplitGotoFirst),
+            15 => Some(OpCode::SplitNextFirst),
+            16 => Some(OpCode::Match),
+            17 => Some(OpCode::LookaheadMatch),
+            18 => Some(OpCode::NegativeLookaheadMatch),
+            19 => Some(OpCode::SaveStart),
+            20 => Some(OpCode::SaveEnd),
+            21 => Some(OpCode::SaveReset),
+            22 => Some(OpCode::Loop),
+            23 => Some(OpCode::LoopSplitGotoFirst),
+            24 => Some(OpCode::LoopSplitNextFirst),
+            25 => Some(OpCode::LoopCheckAdvSplitGotoFirst),
+            26 => Some(OpCode::LoopCheckAdvSplitNextFirst),
+            27 => Some(OpCode::SetI32),
+            28 => Some(OpCode::WordBoundary),
+            29 => Some(OpCode::WordBoundaryI),
+            30 => Some(OpCode::NotWordBoundary),
+            31 => Some(OpCode::NotWordBoundaryI),
+            32 => Some(OpCode::BackReference),
+            33 => Some(OpCode::BackReferenceI),
+            34 => Some(OpCode::BackwardBackReference),
+            35 => Some(OpCode::BackwardBackReferenceI),
+            36 => Some(OpCode::Range),
+            37 => Some(OpCode::RangeI),
+            38 => Some(OpCode::Range32),
+            39 => Some(OpCode::Range32I),
+            40 => Some(OpCode::Lookahead),
+            41 => Some(OpCode::NegativeLookahead),
+            42 => Some(OpCode::SetCharPos),
+            43 => Some(OpCode::CheckAdvance),
+            44 => Some(OpCode::Prev),
+            _ => None,
         }
     }
 }
-
-/// Number of opcodes
-pub const OPCODE_COUNT: usize = 45;
 
 #[cfg(test)]
 mod tests {

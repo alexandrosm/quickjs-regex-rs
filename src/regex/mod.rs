@@ -3,9 +3,29 @@
 //! This module provides a safe, idiomatic Rust API built on top of
 //! the c2rust-translated QuickJS regex engine.
 
+// Allow attributes for c2rust-generated code (util, unicode, engine modules)
+#![allow(internal_features)]
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_assignments)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+#![allow(clippy::all)]
+
 mod opcodes;
 mod flags;
 mod error;
+
+// C2Rust generated modules (formerly in src/generated/)
+mod util;
+mod unicode;
+pub(crate) mod engine;
+
+// Clean Rust interpreter (experimental)
+mod interpreter;
 
 pub use opcodes::OpCode;
 pub use flags::{Flags, InvalidFlag};
@@ -14,55 +34,134 @@ pub use error::{Error, Result, ExecResult};
 use std::ffi::CStr;
 use std::ptr;
 
-use crate::generated::libregexp;
+use memchr::{memchr, memchr2, memchr3, memmem};
+
+// Threshold for using optimizations (bytes)
+const OPTIMIZATION_THRESHOLD: usize = 32;
 
 // ============================================================================
-// External C callbacks required by the libregexp code
+// ByteBitmap - 256-bit bitmap for fast byte set membership testing
 // ============================================================================
 
-/// Memory allocator callback for the regex engine.
-/// This is called by the C code through the extern "C" declaration.
-/// Uses libc-style malloc/realloc/free semantics.
-#[no_mangle]
-pub unsafe extern "C" fn lre_realloc(
-    _opaque: *mut core::ffi::c_void,
-    ptr: *mut core::ffi::c_void,
-    size: usize,
-) -> *mut core::ffi::c_void {
-    if size == 0 {
-        // Free
-        if !ptr.is_null() {
-            libc::free(ptr);
+/// A 256-bit bitmap for testing byte membership in O(1)
+/// Inspired by regress's ByteBitmap for fast character class scanning
+#[derive(Clone)]
+struct ByteBitmap {
+    /// 4 x u64 = 256 bits, one per possible byte value
+    bits: [u64; 4],
+}
+
+impl std::fmt::Debug for ByteBitmap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ByteBitmap({} bytes set)", self.count())
+    }
+}
+
+impl ByteBitmap {
+    /// Create an empty bitmap
+    #[inline]
+    const fn new() -> Self {
+        Self { bits: [0; 4] }
+    }
+
+    /// Create a bitmap from a slice of bytes
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let mut bm = Self::new();
+        for &b in bytes {
+            bm.set(b);
         }
-        return ptr::null_mut();
+        bm
     }
 
-    if ptr.is_null() {
-        // Allocate new
-        libc::malloc(size)
-    } else {
-        // Realloc
-        libc::realloc(ptr, size)
+    /// Set a byte in the bitmap
+    #[inline]
+    fn set(&mut self, byte: u8) {
+        let idx = (byte >> 6) as usize;  // Which u64 (0-3)
+        let bit = byte & 0x3F;           // Which bit (0-63)
+        self.bits[idx] |= 1u64 << bit;
+    }
+
+    /// Test if a byte is in the bitmap (branchless!)
+    #[inline(always)]
+    fn contains(&self, byte: u8) -> bool {
+        let idx = (byte >> 6) as usize;
+        let bit = byte & 0x3F;
+        (self.bits[idx] >> bit) & 1 != 0
+    }
+
+    /// Count set bits
+    fn count(&self) -> u32 {
+        self.bits.iter().map(|x| x.count_ones()).sum()
+    }
+
+    /// Find first matching byte in slice using chunk processing
+    /// Processes 4 bytes at a time for better throughput
+    #[inline]
+    fn find_in_slice(&self, bytes: &[u8]) -> Option<usize> {
+        let len = bytes.len();
+        let mut i = 0;
+
+        // Process 4 bytes at a time (branchless inner loop)
+        while i + 4 <= len {
+            // Check all 4 bytes, compute matches branchlessly
+            let m0 = self.contains(bytes[i]) as usize;
+            let m1 = self.contains(bytes[i + 1]) as usize;
+            let m2 = self.contains(bytes[i + 2]) as usize;
+            let m3 = self.contains(bytes[i + 3]) as usize;
+
+            // If any matched, find which one (first match wins)
+            if (m0 | m1 | m2 | m3) != 0 {
+                if m0 != 0 { return Some(i); }
+                if m1 != 0 { return Some(i + 1); }
+                if m2 != 0 { return Some(i + 2); }
+                return Some(i + 3);
+            }
+            i += 4;
+        }
+
+        // Handle remaining bytes
+        while i < len {
+            if self.contains(bytes[i]) {
+                return Some(i);
+            }
+            i += 1;
+        }
+
+        None
     }
 }
 
-/// Timeout check callback - always returns 0 (no timeout)
-/// Can be made configurable in the future for long-running matches
-#[no_mangle]
-pub unsafe extern "C" fn lre_check_timeout(
-    _opaque: *mut core::ffi::c_void,
-) -> core::ffi::c_int {
-    0 // No timeout
-}
+// ============================================================================
+// Search Strategy - determines how to find potential match positions
+// ============================================================================
 
-/// Stack overflow check callback - always returns 0 (no overflow)
-/// Can be made more sophisticated in the future
-#[no_mangle]
-pub unsafe extern "C" fn lre_check_stack_overflow(
-    _opaque: *mut core::ffi::c_void,
-    _alloca_size: usize,
-) -> core::ffi::c_int {
-    0 // No stack overflow
+/// Optimized search strategy extracted from pattern analysis
+#[derive(Debug, Clone)]
+enum SearchStrategy {
+    /// Pattern is anchored to start - only try position 0
+    Anchored,
+    /// Pattern is ^literal - anchored pure literal
+    AnchoredLiteral(Vec<u8>),
+    /// Pattern is a pure literal - no engine needed!
+    PureLiteral(Vec<u8>),
+    /// Single literal byte to search for
+    SingleByte(u8),
+    /// Two possible first bytes (e.g., alternation or case-insensitive)
+    TwoBytes(u8, u8),
+    /// Three possible first bytes
+    ThreeBytes(u8, u8, u8),
+    /// Multi-byte literal prefix
+    LiteralPrefix(Vec<u8>),
+    /// Bitmap-based search for character classes with 4+ bytes
+    Bitmap(ByteBitmap),
+    /// Search for digit (0-9)
+    Digit,
+    /// Search for word char start (a-z, A-Z, 0-9, _)
+    WordChar,
+    /// Search for whitespace
+    Whitespace,
+    /// No optimization available - scan every position
+    None,
 }
 
 // ============================================================================
@@ -73,12 +172,12 @@ pub unsafe extern "C" fn lre_check_stack_overflow(
 pub struct Regex {
     /// The compiled bytecode (heap-allocated)
     bytecode: *mut u8,
-    /// Length of the bytecode
-    bytecode_len: usize,
     /// The original pattern (for Display)
     pattern: String,
     /// The flags
     flags: Flags,
+    /// Optimized search strategy
+    strategy: SearchStrategy,
 }
 
 // Regex is Send + Sync since the bytecode is immutable after compilation
@@ -102,20 +201,19 @@ impl Regex {
         let mut pattern_buf: Vec<u8> = pattern.as_bytes().to_vec();
         pattern_buf.push(0);
 
-        let bytecode = unsafe {
-            libregexp::lre_compile(
-                &mut bytecode_len,
-                error_msg.as_mut_ptr(),
-                error_msg.len() as i32,
-                pattern_buf.as_ptr() as *const i8,
-                pattern.len(),  // Original length without null terminator
-                flags.bits() as i32,
-                ptr::null_mut(),
-            )
-        };
+        let bytecode = engine::lre_compile(
+            &mut bytecode_len,
+            error_msg.as_mut_ptr(),
+            error_msg.len() as i32,
+            pattern_buf.as_ptr() as *const i8,
+            pattern.len(),
+            flags.bits() as i32,
+            ptr::null_mut(),
+        );
 
         if bytecode.is_null() {
-            // Extract error message
+            // SAFETY: error_msg was populated by lre_compile with a null-terminated
+            // C string on failure. The buffer is valid for reads up to its length.
             let msg = unsafe {
                 CStr::from_ptr(error_msg.as_ptr())
                     .to_string_lossy()
@@ -124,57 +222,354 @@ impl Regex {
             return Err(Error::Syntax(msg));
         }
 
+        // Analyze pattern to determine optimal search strategy
+        let strategy = analyze_pattern(pattern, flags);
+
         Ok(Regex {
             bytecode,
-            bytecode_len: bytecode_len as usize,
             pattern: pattern.to_string(),
             flags,
+            strategy,
         })
     }
 
     /// Test if the pattern matches anywhere in the text
     pub fn is_match(&self, text: &str) -> bool {
-        self.find_at(text, 0).is_some()
+        self.find(text).is_some()
     }
 
     /// Find the first match in the text
+    ///
+    /// Uses optimized search strategies based on pattern analysis.
     pub fn find(&self, text: &str) -> Option<Match> {
-        self.find_at(text, 0)
+        let len = text.len();
+
+        // For short inputs, just use the engine directly
+        if len < OPTIMIZATION_THRESHOLD {
+            return self.find_at(text, 0);
+        }
+
+        // Use the pre-computed search strategy
+        match &self.strategy {
+            SearchStrategy::Anchored => {
+                // Only try at position 0
+                self.find_at(text, 0)
+            }
+
+            SearchStrategy::AnchoredLiteral(literal) => {
+                // Fast path: ^literal - just check prefix
+                self.find_anchored_literal(text, literal)
+            }
+
+            SearchStrategy::PureLiteral(literal) => {
+                // Fast path: pure literal patterns skip the engine entirely!
+                self.find_pure_literal(text, literal)
+            }
+
+            SearchStrategy::SingleByte(b) => {
+                self.find_with_single_byte(text, *b)
+            }
+
+            SearchStrategy::TwoBytes(b1, b2) => {
+                self.find_with_two_bytes(text, *b1, *b2)
+            }
+
+            SearchStrategy::ThreeBytes(b1, b2, b3) => {
+                self.find_with_three_bytes(text, *b1, *b2, *b3)
+            }
+
+            SearchStrategy::LiteralPrefix(prefix) => {
+                self.find_with_literal_prefix(text, prefix)
+            }
+
+            SearchStrategy::Bitmap(bitmap) => {
+                self.find_with_bitmap(text, bitmap)
+            }
+
+            SearchStrategy::Digit => {
+                self.find_with_digit_scan(text)
+            }
+
+            SearchStrategy::WordChar => {
+                self.find_with_word_char_scan(text)
+            }
+
+            SearchStrategy::Whitespace => {
+                self.find_with_whitespace_scan(text)
+            }
+
+            SearchStrategy::None => {
+                self.find_at(text, 0)
+            }
+        }
+    }
+
+    /// Find an anchored literal pattern (^literal) - just check prefix
+    #[inline]
+    fn find_anchored_literal(&self, text: &str, literal: &[u8]) -> Option<Match> {
+        let bytes = text.as_bytes();
+        if bytes.len() >= literal.len() && bytes.starts_with(literal) {
+            Some(Match {
+                start: 0,
+                end: literal.len(),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Find a pure literal pattern - no engine needed!
+    #[inline]
+    fn find_pure_literal(&self, text: &str, literal: &[u8]) -> Option<Match> {
+        let bytes = text.as_bytes();
+        if literal.len() == 1 {
+            // Single byte - use memchr directly
+            memchr(literal[0], bytes).map(|pos| Match {
+                start: pos,
+                end: pos + 1,
+            })
+        } else {
+            // Multi-byte - use memmem
+            memmem::find(bytes, literal).map(|pos| Match {
+                start: pos,
+                end: pos + literal.len(),
+            })
+        }
+    }
+
+    /// Find using single-byte search (fastest)
+    #[inline]
+    fn find_with_single_byte(&self, text: &str, byte: u8) -> Option<Match> {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+
+        while let Some(pos) = memchr(byte, &bytes[start..]) {
+            let abs_pos = start + pos;
+            if let Some(m) = self.find_at(text, abs_pos) {
+                if m.start == abs_pos {
+                    return Some(m);
+                }
+            }
+            start = abs_pos + 1;
+            if start >= bytes.len() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Find using two-byte search
+    #[inline]
+    fn find_with_two_bytes(&self, text: &str, b1: u8, b2: u8) -> Option<Match> {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+
+        while let Some(pos) = memchr2(b1, b2, &bytes[start..]) {
+            let abs_pos = start + pos;
+            if let Some(m) = self.find_at(text, abs_pos) {
+                if m.start == abs_pos {
+                    return Some(m);
+                }
+            }
+            start = abs_pos + 1;
+            if start >= bytes.len() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Find using three-byte search
+    #[inline]
+    fn find_with_three_bytes(&self, text: &str, b1: u8, b2: u8, b3: u8) -> Option<Match> {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+
+        while let Some(pos) = memchr3(b1, b2, b3, &bytes[start..]) {
+            let abs_pos = start + pos;
+            if let Some(m) = self.find_at(text, abs_pos) {
+                if m.start == abs_pos {
+                    return Some(m);
+                }
+            }
+            start = abs_pos + 1;
+            if start >= bytes.len() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Find using literal prefix search (memmem)
+    #[inline]
+    fn find_with_literal_prefix(&self, text: &str, prefix: &[u8]) -> Option<Match> {
+        let finder = memmem::Finder::new(prefix);
+        let bytes = text.as_bytes();
+
+        for pos in finder.find_iter(bytes) {
+            if let Some(m) = self.find_at(text, pos) {
+                if m.start == pos {
+                    return Some(m);
+                }
+            }
+        }
+        None
+    }
+
+    /// Find using bitmap-based byte set search (for character classes)
+    #[inline]
+    fn find_with_bitmap(&self, text: &str, bitmap: &ByteBitmap) -> Option<Match> {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+
+        while let Some(pos) = bitmap.find_in_slice(&bytes[start..]) {
+            let abs_pos = start + pos;
+            if let Some(m) = self.find_at(text, abs_pos) {
+                if m.start == abs_pos {
+                    return Some(m);
+                }
+            }
+            start = abs_pos + 1;
+            if start >= bytes.len() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Find by scanning for digits (0-9)
+    #[inline]
+    fn find_with_digit_scan(&self, text: &str) -> Option<Match> {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+
+        while start < bytes.len() {
+            // Find next digit using memchr3 for common digits, then check others
+            if let Some(pos) = find_digit(&bytes[start..]) {
+                let abs_pos = start + pos;
+                if let Some(m) = self.find_at(text, abs_pos) {
+                    if m.start == abs_pos {
+                        return Some(m);
+                    }
+                }
+                start = abs_pos + 1;
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Find by scanning for word characters
+    #[inline]
+    fn find_with_word_char_scan(&self, text: &str) -> Option<Match> {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+
+        while start < bytes.len() {
+            if let Some(pos) = find_word_char(&bytes[start..]) {
+                let abs_pos = start + pos;
+                if let Some(m) = self.find_at(text, abs_pos) {
+                    if m.start == abs_pos {
+                        return Some(m);
+                    }
+                }
+                start = abs_pos + 1;
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Find by scanning for whitespace (branchless using bitmap)
+    #[inline]
+    fn find_with_whitespace_scan(&self, text: &str) -> Option<Match> {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+
+        while let Some(pos) = find_whitespace(&bytes[start..]) {
+            let abs_pos = start + pos;
+            if let Some(m) = self.find_at(text, abs_pos) {
+                if m.start == abs_pos {
+                    return Some(m);
+                }
+            }
+            start = abs_pos + 1;
+            if start >= bytes.len() {
+                break;
+            }
+        }
+        None
     }
 
     /// Find a match starting at the given byte offset
+    /// Uses the pure Rust interpreter - no C code!
     pub fn find_at(&self, text: &str, start: usize) -> Option<Match> {
-        let capture_count = self.capture_count();
-        // We need 2 pointers per capture (start/end)
-        let mut captures: Vec<*mut u8> = vec![ptr::null_mut(); capture_count * 2];
-
         let text_bytes = text.as_bytes();
-        let char_index = if start == 0 {
-            0
-        } else {
-            // Convert byte offset to character index for UTF-8
-            text[..start].chars().count() as i32
+
+        // SAFETY: bytecode is valid from constructor
+        let bytecode = unsafe {
+            std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
         };
 
-        let result = unsafe {
-            libregexp::lre_exec(
+        let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
+
+        match ctx.exec(start) {
+            interpreter::ExecResult::Match => {
+                // Extract match from captures
+                if let (Some(match_start), Some(match_end)) = (
+                    ctx.captures.get(0).copied().flatten(),
+                    ctx.captures.get(1).copied().flatten()
+                ) {
+                    Some(Match {
+                        start: match_start,
+                        end: match_end,
+                    })
+                } else {
+                    None
+                }
+            }
+            interpreter::ExecResult::NoMatch => None,
+        }
+    }
+
+    /// Find a match using the original C engine (for benchmarking comparison)
+    /// This uses the c2rust-transpiled lre_exec function
+    #[doc(hidden)]
+    pub fn find_at_c_engine(&self, text: &str, start: usize) -> Option<Match> {
+        let text_bytes = text.as_bytes();
+        let capture_count = self.capture_count();
+
+        // Allocate capture array
+        let mut captures: Vec<*mut u8> = vec![std::ptr::null_mut(); capture_count * 2];
+
+        // Call the C engine
+        let ret = unsafe {
+            engine::lre_exec(
                 captures.as_mut_ptr(),
                 self.bytecode,
                 text_bytes.as_ptr(),
-                char_index,
+                start as i32,
                 text_bytes.len() as i32,
-                0, // cbuf_type: 0 = UTF-8
-                ptr::null_mut(),
+                0, // cbuf_type = 8-bit
+                std::ptr::null_mut(), // opaque
             )
         };
 
-        if result == 1 && !captures[0].is_null() && !captures[1].is_null() {
-            let start_ptr = captures[0] as usize;
-            let end_ptr = captures[1] as usize;
-            let text_start = text_bytes.as_ptr() as usize;
-
-            let match_start = start_ptr - text_start;
-            let match_end = end_ptr - text_start;
+        if ret == 1 {
+            // Match found - extract positions
+            let text_start = text_bytes.as_ptr();
+            let match_start = if captures[0].is_null() {
+                return None;
+            } else {
+                unsafe { captures[0].offset_from(text_start) as usize }
+            };
+            let match_end = if captures[1].is_null() {
+                return None;
+            } else {
+                unsafe { captures[1].offset_from(text_start) as usize }
+            };
 
             Some(Match {
                 start: match_start,
@@ -185,9 +580,24 @@ impl Regex {
         }
     }
 
+    /// Get bytecode length
+    fn bytecode_len(&self) -> usize {
+        // SAFETY: bytecode is valid from constructor
+        unsafe {
+            let header = std::slice::from_raw_parts(self.bytecode, engine::RE_HEADER_LEN as usize);
+            let bc_len = engine::lre_get_bytecode_len(header);
+            engine::RE_HEADER_LEN as usize + bc_len as usize
+        }
+    }
+
     /// Get the number of capture groups (including group 0 for the whole match)
     pub fn capture_count(&self) -> usize {
-        unsafe { libregexp::lre_get_capture_count(self.bytecode) as usize }
+        // SAFETY: self.bytecode is valid (checked non-null in constructor).
+        // We only need RE_HEADER_LEN (8) bytes for the header.
+        let header = unsafe {
+            std::slice::from_raw_parts(self.bytecode, engine::RE_HEADER_LEN as usize)
+        };
+        engine::lre_get_capture_count(header) as usize
     }
 
     /// Get the flags
@@ -199,13 +609,118 @@ impl Regex {
     pub fn pattern(&self) -> &str {
         &self.pattern
     }
+
+    /// Find all non-overlapping matches.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use quickjs_regex::Regex;
+    ///
+    /// let re = Regex::new(r"\d+").unwrap();
+    /// let text = "a1b22c333";
+    /// let matches: Vec<_> = re.find_iter(text).collect();
+    /// assert_eq!(matches.len(), 3);
+    /// ```
+    pub fn find_iter<'r, 't>(&'r self, text: &'t str) -> MatchIterator<'r, 't> {
+        // Use specialized iterator for pure literals (much faster!)
+        match &self.strategy {
+            SearchStrategy::PureLiteral(literal) => {
+                MatchIterator::Literal(LiteralMatches {
+                    literal: literal.as_slice(),
+                    text,
+                    pos: 0,
+                })
+            }
+            _ => {
+                MatchIterator::General(Matches {
+                    regex: self,
+                    text,
+                    last_end: 0,
+                    last_was_empty: false,
+                })
+            }
+        }
+    }
+
+    /// Get capture groups from the first match.
+    ///
+    /// Returns `None` if there is no match. Returns `Some(Captures)` with
+    /// all capture groups on success. Group 0 is the entire match.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use quickjs_regex::Regex;
+    ///
+    /// let re = Regex::new(r"(\w+)@(\w+)\.(\w+)").unwrap();
+    /// let caps = re.captures("user@example.com").unwrap();
+    /// assert_eq!(caps.get_str(0), Some("user@example.com"));
+    /// assert_eq!(caps.get_str(1), Some("user"));
+    /// assert_eq!(caps.get_str(2), Some("example"));
+    /// assert_eq!(caps.get_str(3), Some("com"));
+    /// ```
+    pub fn captures(&self, text: &str) -> Option<Captures> {
+        self.captures_at(text, 0)
+    }
+
+    /// Get capture groups from a match starting at the given byte offset.
+    pub fn captures_at(&self, text: &str, start: usize) -> Option<Captures> {
+        let capture_count = self.capture_count();
+        let mut capture_ptrs: Vec<*mut u8> = vec![ptr::null_mut(); capture_count * 2];
+
+        let text_bytes = text.as_bytes();
+        let char_index = if start == 0 {
+            0
+        } else {
+            text[..start].chars().count() as i32
+        };
+
+        let result = engine::lre_exec(
+            capture_ptrs.as_mut_ptr(),
+            self.bytecode,
+            text_bytes.as_ptr(),
+            char_index,
+            text_bytes.len() as i32,
+            0,
+            ptr::null_mut(),
+        );
+
+        if result != 1 {
+            return None;
+        }
+
+        let text_start = text_bytes.as_ptr() as usize;
+        let mut groups = Vec::with_capacity(capture_count);
+
+        for i in 0..capture_count {
+            let start_ptr = capture_ptrs[i * 2];
+            let end_ptr = capture_ptrs[i * 2 + 1];
+
+            if start_ptr.is_null() || end_ptr.is_null() {
+                groups.push(None);
+            } else {
+                let match_start = start_ptr as usize - text_start;
+                let match_end = end_ptr as usize - text_start;
+                groups.push(Some((match_start, match_end)));
+            }
+        }
+
+        Some(Captures {
+            text: text.to_string(),
+            groups,
+        })
+    }
 }
 
 impl Drop for Regex {
     fn drop(&mut self) {
         if !self.bytecode.is_null() {
+            // SAFETY: bytecode was allocated by lre_compile via lre_realloc (which uses libc::malloc).
+            // It has not been freed (Drop only runs once). No other references exist
+            // (Regex owns the bytecode exclusively).
             unsafe {
-                libc::free(self.bytecode as *mut core::ffi::c_void);
+                libc::free(self.bytecode as *mut std::ffi::c_void);
             }
         }
     }
@@ -252,6 +767,586 @@ impl Match {
     }
 }
 
+/// Captured groups from a regex match.
+///
+/// Group 0 is always the entire match. Groups 1+ are the explicit
+/// capture groups in the pattern.
+#[derive(Debug, Clone)]
+pub struct Captures {
+    /// The original text
+    text: String,
+    /// Pairs of (start, end) byte offsets for each group
+    /// None means the group didn't participate in the match
+    groups: Vec<Option<(usize, usize)>>,
+}
+
+impl Captures {
+    /// Get the number of capture groups (including group 0).
+    pub fn len(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// Check if there are no captures (should never be true for a valid match).
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
+    /// Get a specific capture group by index.
+    ///
+    /// Group 0 is the entire match. Returns `None` if the group
+    /// index is out of bounds or if the group didn't participate
+    /// in the match.
+    pub fn get(&self, i: usize) -> Option<Match> {
+        self.groups.get(i).and_then(|opt| {
+            opt.map(|(start, end)| Match { start, end })
+        })
+    }
+
+    /// Get the text of a specific capture group.
+    pub fn get_str(&self, i: usize) -> Option<&str> {
+        self.get(i).map(|m| &self.text[m.start..m.end])
+    }
+
+    /// Get the entire match (group 0).
+    pub fn entire_match(&self) -> Option<Match> {
+        self.get(0)
+    }
+
+    /// Iterate over all capture groups.
+    pub fn iter(&self) -> impl Iterator<Item = Option<Match>> + '_ {
+        self.groups.iter().map(|opt| {
+            opt.map(|(start, end)| Match { start, end })
+        })
+    }
+}
+
+/// Match iterator enum - dispatches between literal and general matching
+pub enum MatchIterator<'r, 't> {
+    Literal(LiteralMatches<'r, 't>),
+    General(Matches<'r, 't>),
+}
+
+impl<'r, 't> Iterator for MatchIterator<'r, 't> {
+    type Item = Match;
+
+    fn next(&mut self) -> Option<Match> {
+        match self {
+            MatchIterator::Literal(lit) => lit.next(),
+            MatchIterator::General(gen) => gen.next(),
+        }
+    }
+}
+
+/// Fast iterator for pure literal patterns using memmem
+pub struct LiteralMatches<'r, 't> {
+    literal: &'r [u8],
+    text: &'t str,
+    pos: usize,
+}
+
+impl<'r, 't> Iterator for LiteralMatches<'r, 't> {
+    type Item = Match;
+
+    fn next(&mut self) -> Option<Match> {
+        if self.pos >= self.text.len() {
+            return None;
+        }
+
+        let bytes = self.text.as_bytes();
+        if let Some(found) = memmem::find(&bytes[self.pos..], self.literal) {
+            let start = self.pos + found;
+            let end = start + self.literal.len();
+            self.pos = end; // Non-overlapping
+            Some(Match { start, end })
+        } else {
+            self.pos = self.text.len(); // No more matches
+            None
+        }
+    }
+}
+
+/// An iterator over all non-overlapping matches in a string.
+pub struct Matches<'r, 't> {
+    regex: &'r Regex,
+    text: &'t str,
+    last_end: usize,
+    /// Track if last match was empty to avoid infinite loops
+    last_was_empty: bool,
+}
+
+impl<'r, 't> Iterator for Matches<'r, 't> {
+    type Item = Match;
+
+    fn next(&mut self) -> Option<Match> {
+        if self.last_end > self.text.len() {
+            return None;
+        }
+
+        let search_start = if self.last_was_empty {
+            // After an empty match, advance by one character to avoid infinite loop
+            let mut next = self.last_end;
+            if next < self.text.len() {
+                // Advance by one UTF-8 character
+                next += self.text[next..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            } else {
+                return None;
+            }
+            next
+        } else {
+            self.last_end
+        };
+
+        match self.regex.find_at(self.text, search_start) {
+            Some(m) => {
+                self.last_was_empty = m.is_empty();
+                self.last_end = m.end;
+                Some(m)
+            }
+            None => None,
+        }
+    }
+}
+
+// ============================================================================
+// Pattern Analysis - determines optimal search strategy
+// ============================================================================
+
+/// Analyze a pattern to determine the best search strategy.
+fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
+    let mut chars = pattern.chars().peekable();
+
+    // Check for start anchor
+    if chars.peek() == Some(&'^') {
+        chars.next(); // consume '^'
+        // Check if the rest is a pure literal
+        let anchored_literal = analyze_anchored_remainder(&mut chars, flags);
+        return anchored_literal;
+    }
+
+    // Case-insensitive patterns are tricky - handle alternation of cases
+    let case_insensitive = flags.is_ignore_case();
+
+    // Try to extract leading literal(s) or character class
+    let mut literals = Vec::new();
+    let mut is_pure_literal = true; // Track if we consumed the entire pattern
+
+    while let Some(c) = chars.next() {
+        match c {
+            // Metacharacters - use accumulated literals if any
+            '.' => {
+                // Dot matches anything - break and use what we have
+                is_pure_literal = false;
+                if literals.is_empty() {
+                    return SearchStrategy::None;
+                }
+                break;
+            }
+
+            '*' | '+' | '?' => {
+                // Quantifier - use what we have (minus the quantified char)
+                // If the previous char is quantified, it's not a reliable prefix
+                is_pure_literal = false;
+                if !literals.is_empty() {
+                    literals.pop(); // Remove the quantified character
+                }
+                break;
+            }
+
+            '[' => {
+                // Character class - try to extract specific bytes
+                is_pure_literal = false;
+                if literals.is_empty() {
+                    return analyze_char_class(&mut chars, case_insensitive);
+                }
+                break;
+            }
+
+            '(' => {
+                is_pure_literal = false;
+                // Group - check for non-capturing or special
+                if chars.peek() == Some(&'?') {
+                    chars.next();
+                    match chars.next() {
+                        Some(':') => continue, // Non-capturing, continue
+                        Some('=') | Some('!') => {
+                            // Lookahead - use what we have
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                // Capturing group - continue parsing inside
+                continue;
+            }
+
+            ')' | '{' | '}' | '$' => {
+                is_pure_literal = false;
+                break;
+            }
+
+            '|' => {
+                // Alternation at top level - need to analyze all branches
+                // regardless of what literals we've accumulated so far
+                return analyze_alternation(pattern, case_insensitive);
+            }
+
+            '\\' => {
+                // Escape sequence
+                match chars.next() {
+                    // Character classes
+                    Some('d') | Some('D') => {
+                        is_pure_literal = false;
+                        if literals.is_empty() {
+                            return SearchStrategy::Digit;
+                        }
+                        break;
+                    }
+                    Some('w') | Some('W') => {
+                        is_pure_literal = false;
+                        if literals.is_empty() {
+                            return SearchStrategy::WordChar;
+                        }
+                        break;
+                    }
+                    Some('s') | Some('S') => {
+                        is_pure_literal = false;
+                        if literals.is_empty() {
+                            return SearchStrategy::Whitespace;
+                        }
+                        break;
+                    }
+                    Some('b') | Some('B') => {
+                        // Word boundary - not a pure literal anymore
+                        is_pure_literal = false;
+                        continue;
+                    }
+                    // Literal escapes
+                    Some('\\') => literals.push(b'\\'),
+                    Some('/') => literals.push(b'/'),
+                    Some('n') => literals.push(b'\n'),
+                    Some('r') => literals.push(b'\r'),
+                    Some('t') => literals.push(b'\t'),
+                    Some('.') => literals.push(b'.'),
+                    Some('*') => literals.push(b'*'),
+                    Some('+') => literals.push(b'+'),
+                    Some('?') => literals.push(b'?'),
+                    Some('[') => literals.push(b'['),
+                    Some(']') => literals.push(b']'),
+                    Some('(') => literals.push(b'('),
+                    Some(')') => literals.push(b')'),
+                    Some('{') => literals.push(b'{'),
+                    Some('}') => literals.push(b'}'),
+                    Some('|') => literals.push(b'|'),
+                    Some('^') => literals.push(b'^'),
+                    Some('$') => literals.push(b'$'),
+                    _ => {
+                        is_pure_literal = false;
+                        break;
+                    }
+                }
+            }
+
+            // Regular character
+            _ if c.is_ascii() => {
+                if case_insensitive && c.is_ascii_alphabetic() {
+                    // For case-insensitive, first char could be upper or lower
+                    is_pure_literal = false;
+                    if literals.is_empty() {
+                        let lower = c.to_ascii_lowercase() as u8;
+                        let upper = c.to_ascii_uppercase() as u8;
+                        if lower != upper {
+                            return SearchStrategy::TwoBytes(lower, upper);
+                        }
+                    }
+                    break;
+                }
+                literals.push(c as u8);
+            }
+
+            _ => {
+                is_pure_literal = false;
+                break; // Non-ASCII
+            }
+        }
+    }
+
+    // Convert literals to appropriate strategy
+    match literals.len() {
+        0 => SearchStrategy::None,
+        1 if is_pure_literal => SearchStrategy::PureLiteral(literals),
+        1 => SearchStrategy::SingleByte(literals[0]),
+        _ if is_pure_literal => SearchStrategy::PureLiteral(literals),
+        _ => SearchStrategy::LiteralPrefix(literals),
+    }
+}
+
+/// Analyze the remainder of a pattern after ^ to see if it's a pure literal
+fn analyze_anchored_remainder(chars: &mut std::iter::Peekable<std::str::Chars>, flags: Flags) -> SearchStrategy {
+    if flags.is_ignore_case() {
+        // Case-insensitive anchored patterns need full engine
+        return SearchStrategy::Anchored;
+    }
+
+    let mut literals = Vec::new();
+
+    while let Some(c) = chars.next() {
+        match c {
+            // Any metacharacter means it's not a pure literal
+            '.' | '*' | '+' | '?' | '[' | '(' | ')' | '{' | '}' | '$' | '|' => {
+                return SearchStrategy::Anchored;
+            }
+            '\\' => {
+                // Check for literal escapes
+                match chars.next() {
+                    Some('\\') => literals.push(b'\\'),
+                    Some('/') => literals.push(b'/'),
+                    Some('n') => literals.push(b'\n'),
+                    Some('r') => literals.push(b'\r'),
+                    Some('t') => literals.push(b'\t'),
+                    Some('.') => literals.push(b'.'),
+                    Some('*') => literals.push(b'*'),
+                    Some('+') => literals.push(b'+'),
+                    Some('?') => literals.push(b'?'),
+                    Some('[') => literals.push(b'['),
+                    Some(']') => literals.push(b']'),
+                    Some('(') => literals.push(b'('),
+                    Some(')') => literals.push(b')'),
+                    Some('{') => literals.push(b'{'),
+                    Some('}') => literals.push(b'}'),
+                    Some('|') => literals.push(b'|'),
+                    Some('^') => literals.push(b'^'),
+                    Some('$') => literals.push(b'$'),
+                    _ => return SearchStrategy::Anchored,
+                }
+            }
+            _ if c.is_ascii() => {
+                literals.push(c as u8);
+            }
+            _ => return SearchStrategy::Anchored,
+        }
+    }
+
+    if literals.is_empty() {
+        SearchStrategy::Anchored
+    } else {
+        SearchStrategy::AnchoredLiteral(literals)
+    }
+}
+
+/// Analyze a character class like [abc] or [a-z]
+fn analyze_char_class(chars: &mut std::iter::Peekable<std::str::Chars>, _case_insensitive: bool) -> SearchStrategy {
+    let mut bytes = Vec::new();
+    let negated = chars.peek() == Some(&'^');
+    if negated {
+        chars.next();
+        // Negated classes are hard to optimize
+        // Just consume until ] and return None
+        while let Some(c) = chars.next() {
+            if c == ']' {
+                break;
+            }
+        }
+        return SearchStrategy::None;
+    }
+
+    while let Some(c) = chars.next() {
+        match c {
+            ']' => break,
+            '\\' => {
+                match chars.next() {
+                    Some('d') => {
+                        // \d in character class
+                        for b in b'0'..=b'9' {
+                            bytes.push(b);
+                        }
+                    }
+                    Some('w') => {
+                        // Too many characters for memchr
+                        return SearchStrategy::WordChar;
+                    }
+                    Some('s') => {
+                        return SearchStrategy::Whitespace;
+                    }
+                    Some(escaped) if escaped.is_ascii() => {
+                        bytes.push(escaped as u8);
+                    }
+                    _ => return SearchStrategy::None,
+                }
+            }
+            '-' => {
+                // Range - check if we have a previous byte
+                if let Some(&prev) = bytes.last() {
+                    if let Some(end) = chars.next() {
+                        if end != ']' && end.is_ascii() {
+                            let end_byte = end as u8;
+                            // Add all bytes in range
+                            for b in (prev + 1)..=end_byte {
+                                bytes.push(b);
+                            }
+                        }
+                    }
+                }
+            }
+            _ if c.is_ascii() => {
+                bytes.push(c as u8);
+            }
+            _ => return SearchStrategy::None,
+        }
+
+        // Limit to 128 bytes (ASCII range) to avoid huge allocations
+        if bytes.len() > 128 {
+            return SearchStrategy::None;
+        }
+    }
+
+    // Deduplicate and sort
+    bytes.sort_unstable();
+    bytes.dedup();
+
+    match bytes.len() {
+        0 => SearchStrategy::None,
+        1 => SearchStrategy::SingleByte(bytes[0]),
+        2 => SearchStrategy::TwoBytes(bytes[0], bytes[1]),
+        3 => SearchStrategy::ThreeBytes(bytes[0], bytes[1], bytes[2]),
+        // Use bitmap for 4+ bytes - much faster than falling back to None!
+        _ => SearchStrategy::Bitmap(ByteBitmap::from_bytes(&bytes)),
+    }
+}
+
+/// Analyze alternation like foo|bar|baz to extract first bytes
+fn analyze_alternation(pattern: &str, case_insensitive: bool) -> SearchStrategy {
+    let mut first_bytes = Vec::new();
+    let mut depth = 0;
+    let mut chars = pattern.chars().peekable();
+    let mut current_first: Option<u8> = None;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '(' => {
+                depth += 1;
+            }
+            ')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            '|' if depth == 0 => {
+                // End of this alternative
+                if let Some(b) = current_first {
+                    first_bytes.push(b);
+                }
+                current_first = None;
+            }
+            '\\' if current_first.is_none() => {
+                match chars.next() {
+                    Some(escaped) if escaped.is_ascii() && !matches!(escaped, 'd' | 'w' | 's' | 'D' | 'W' | 'S') => {
+                        current_first = Some(escaped as u8);
+                    }
+                    _ => return SearchStrategy::None,
+                }
+            }
+            _ if current_first.is_none() && c.is_ascii() && !matches!(c, '.' | '*' | '+' | '?' | '[' | '^' | '$') => {
+                if case_insensitive && c.is_ascii_alphabetic() {
+                    // Add both cases
+                    first_bytes.push(c.to_ascii_lowercase() as u8);
+                    first_bytes.push(c.to_ascii_uppercase() as u8);
+                    current_first = Some(c as u8); // Mark as found
+                } else {
+                    current_first = Some(c as u8);
+                }
+            }
+            _ => {
+                // Complex pattern in this alternative
+                if current_first.is_none() {
+                    return SearchStrategy::None;
+                }
+            }
+        }
+    }
+
+    // Don't forget the last alternative
+    if let Some(b) = current_first {
+        first_bytes.push(b);
+    }
+
+    // Deduplicate
+    first_bytes.sort_unstable();
+    first_bytes.dedup();
+
+    match first_bytes.len() {
+        0 => SearchStrategy::None,
+        1 => SearchStrategy::SingleByte(first_bytes[0]),
+        2 => SearchStrategy::TwoBytes(first_bytes[0], first_bytes[1]),
+        3 => SearchStrategy::ThreeBytes(first_bytes[0], first_bytes[1], first_bytes[2]),
+        _ => SearchStrategy::None,
+    }
+}
+
+// ============================================================================
+// Fast byte scanning helpers
+// ============================================================================
+
+// Pre-computed bitmaps for common character classes (used for testing and Bitmap strategy)
+static DIGIT_BITMAP: ByteBitmap = {
+    let mut bits = [0u64; 4];
+    bits[0] = 0x03FF_0000_0000_0000; // bits 48-57 set for '0'-'9'
+    ByteBitmap { bits }
+};
+
+static WORD_CHAR_BITMAP: ByteBitmap = {
+    let mut bits = [0u64; 4];
+    bits[0] = 0x03FF_0000_0000_0000;  // '0'-'9' (48-57)
+    bits[1] = 0x07FF_FFFE_87FF_FFFE;  // A-Z (1-26), _ (31), a-z (33-58)
+    ByteBitmap { bits }
+};
+
+static WHITESPACE_BITMAP: ByteBitmap = {
+    let mut bits = [0u64; 4];
+    bits[0] = (1u64 << 32) | (1u64 << 9) | (1u64 << 10) | (1u64 << 11) | (1u64 << 12) | (1u64 << 13);
+    ByteBitmap { bits }
+};
+
+/// Find the first digit (0-9) in a byte slice
+/// Uses memchr for SIMD acceleration on common digits
+#[inline]
+fn find_digit(bytes: &[u8]) -> Option<usize> {
+    // memchr is SIMD-accelerated and much faster than bitmap checking
+    // Search for common digits first
+    let mut pos = 0;
+    while pos < bytes.len() {
+        // Find any of 0-4 (covers most cases)
+        if let Some(found) = memchr3(b'0', b'1', b'2', &bytes[pos..]) {
+            return Some(pos + found);
+        }
+        // Also check 3-9 with another memchr3 pass
+        if let Some(found) = memchr3(b'3', b'4', b'5', &bytes[pos..]) {
+            return Some(pos + found);
+        }
+        if let Some(found) = memchr3(b'6', b'7', b'8', &bytes[pos..]) {
+            return Some(pos + found);
+        }
+        if let Some(found) = memchr(b'9', &bytes[pos..]) {
+            return Some(pos + found);
+        }
+        break;
+    }
+    None
+}
+
+/// Find the first word character (a-z, A-Z, 0-9, _) in a byte slice
+#[inline]
+fn find_word_char(bytes: &[u8]) -> Option<usize> {
+    // For word chars, bitmap is actually good since we have 63 possible bytes
+    WORD_CHAR_BITMAP.find_in_slice(bytes)
+}
+
+/// Find the first whitespace character
+#[inline]
+fn find_whitespace(bytes: &[u8]) -> Option<usize> {
+    // Common whitespace: space, tab, newline - use memchr3 for SIMD
+    memchr3(b' ', b'\t', b'\n', bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +1391,47 @@ mod tests {
     }
 
     #[test]
+    fn test_quantifier_star() {
+        let re = Regex::new("a*").unwrap();
+        let m = re.find("aaabbb").unwrap();
+        assert_eq!((m.start, m.end), (0, 3));
+    }
+
+    #[test]
+    fn test_quantifier_question() {
+        let re = Regex::new("a?").unwrap();
+        let m = re.find("aaabbb").unwrap();
+        assert_eq!((m.start, m.end), (0, 1));
+    }
+
+    #[test]
+    fn test_quantifier_range() {
+        let re = Regex::new("a{2,4}").unwrap();
+        let m = re.find("aaaaa").unwrap();
+        assert_eq!((m.start, m.end), (0, 4));
+    }
+
+    #[test]
+    fn test_quantifier_range_lazy() {
+        let re = Regex::new("a{2,4}?").unwrap();
+        let m = re.find("aaaaa").unwrap();
+        assert_eq!((m.start, m.end), (0, 2));
+    }
+
+    #[test]
+    fn test_backreference() {
+        // Simple backreference
+        let re = Regex::new(r"(a)\1").unwrap();
+        assert!(re.is_match("aa"));
+        assert!(!re.is_match("ab"));
+
+        // Word backreference
+        let re2 = Regex::new(r"(\w+)\s+\1").unwrap();
+        assert!(re2.is_match("hello hello"));
+        assert!(!re2.is_match("hello world"));
+    }
+
+    #[test]
     fn test_case_insensitive() {
         let re = Regex::with_flags("hello", Flags::from_bits(Flags::IGNORE_CASE)).unwrap();
         assert!(re.is_match("HELLO"));
@@ -334,5 +1470,305 @@ mod tests {
         assert!(re.is_match("abc123"));
         let m = re.find("abc123").unwrap();
         assert_eq!(m.as_str("abc123"), "123");
+    }
+
+    #[test]
+    fn test_find_iter() {
+        let re = Regex::new(r"\d+").unwrap();
+        let text = "a1b22c333d4444";
+        let matches: Vec<_> = re.find_iter(text).collect();
+        assert_eq!(matches.len(), 4);
+        assert_eq!(matches[0].as_str(text), "1");
+        assert_eq!(matches[1].as_str(text), "22");
+        assert_eq!(matches[2].as_str(text), "333");
+        assert_eq!(matches[3].as_str(text), "4444");
+    }
+
+    #[test]
+    fn test_find_iter_no_matches() {
+        let re = Regex::new(r"\d+").unwrap();
+        let matches: Vec<_> = re.find_iter("no digits here").collect();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_captures_basic() {
+        let re = Regex::new(r"(\w+)@(\w+)").unwrap();
+        let caps = re.captures("user@host").unwrap();
+        assert_eq!(caps.len(), 3); // Group 0 + 2 captures
+        assert_eq!(caps.get_str(0), Some("user@host"));
+        assert_eq!(caps.get_str(1), Some("user"));
+        assert_eq!(caps.get_str(2), Some("host"));
+    }
+
+    #[test]
+    fn test_captures_no_match() {
+        let re = Regex::new(r"(\d+)").unwrap();
+        let caps = re.captures("no digits");
+        assert!(caps.is_none());
+    }
+
+    #[test]
+    fn test_captures_optional_group() {
+        let re = Regex::new(r"(\d+)(x)?").unwrap();
+        let caps = re.captures("123").unwrap();
+        assert_eq!(caps.get_str(0), Some("123"));
+        assert_eq!(caps.get_str(1), Some("123"));
+        assert!(caps.get(2).is_none()); // Optional group didn't match
+    }
+
+    #[test]
+    fn test_captures_iter() {
+        let re = Regex::new(r"(a)(b)(c)").unwrap();
+        let caps = re.captures("abc").unwrap();
+        let groups: Vec<_> = caps.iter().collect();
+        assert_eq!(groups.len(), 4);
+        assert!(groups[0].is_some()); // Full match
+        assert!(groups[1].is_some()); // (a)
+        assert!(groups[2].is_some()); // (b)
+        assert!(groups[3].is_some()); // (c)
+    }
+
+    #[test]
+    fn test_match_methods() {
+        let re = Regex::new("test").unwrap();
+        let m = re.find("a test here").unwrap();
+        assert_eq!(m.start, 2);
+        assert_eq!(m.end, 6);
+        assert_eq!(m.len(), 4);
+        assert!(!m.is_empty());
+    }
+
+    // ========================================================================
+    // Search strategy tests
+    // ========================================================================
+
+    #[test]
+    fn test_strategy_anchored() {
+        // Pure anchored literal
+        let strategy = analyze_pattern("^hello", Flags::empty());
+        match strategy {
+            SearchStrategy::AnchoredLiteral(lit) => assert_eq!(lit, b"hello"),
+            _ => panic!("Expected AnchoredLiteral, got {:?}", strategy),
+        }
+
+        // Complex anchored pattern falls back to Anchored
+        let strategy = analyze_pattern("^hello.*world", Flags::empty());
+        assert!(matches!(strategy, SearchStrategy::Anchored));
+    }
+
+    #[test]
+    fn test_strategy_single_byte() {
+        let strategy = analyze_pattern("x.*", Flags::empty());
+        assert!(matches!(strategy, SearchStrategy::SingleByte(b'x')));
+    }
+
+    #[test]
+    fn test_strategy_pure_literal() {
+        // Pure literal patterns should use PureLiteral (no engine!)
+        let strategy = analyze_pattern("needle", Flags::empty());
+        match strategy {
+            SearchStrategy::PureLiteral(literal) => {
+                assert_eq!(literal, b"needle");
+            }
+            _ => panic!("Expected PureLiteral, got {:?}", strategy),
+        }
+
+        // Single char pure literal
+        let strategy = analyze_pattern("x", Flags::empty());
+        match strategy {
+            SearchStrategy::PureLiteral(literal) => {
+                assert_eq!(literal, b"x");
+            }
+            _ => panic!("Expected PureLiteral for single char, got {:?}", strategy),
+        }
+    }
+
+    #[test]
+    fn test_strategy_literal_prefix() {
+        let strategy = analyze_pattern("hello.*world", Flags::empty());
+        match strategy {
+            SearchStrategy::LiteralPrefix(prefix) => {
+                assert_eq!(prefix, b"hello");
+            }
+            _ => panic!("Expected LiteralPrefix, got {:?}", strategy),
+        }
+    }
+
+    #[test]
+    fn test_strategy_digit() {
+        let strategy = analyze_pattern(r"\d+", Flags::empty());
+        assert!(matches!(strategy, SearchStrategy::Digit));
+    }
+
+    #[test]
+    fn test_strategy_word_char() {
+        let strategy = analyze_pattern(r"\w+", Flags::empty());
+        assert!(matches!(strategy, SearchStrategy::WordChar));
+    }
+
+    #[test]
+    fn test_strategy_whitespace() {
+        let strategy = analyze_pattern(r"\s+", Flags::empty());
+        assert!(matches!(strategy, SearchStrategy::Whitespace));
+    }
+
+    #[test]
+    fn test_strategy_bitmap() {
+        // Character class with 4+ chars should use Bitmap
+        let strategy = analyze_pattern("[aeiou].*", Flags::empty());
+        match strategy {
+            SearchStrategy::Bitmap(bm) => {
+                assert!(bm.contains(b'a'));
+                assert!(bm.contains(b'e'));
+                assert!(bm.contains(b'i'));
+                assert!(bm.contains(b'o'));
+                assert!(bm.contains(b'u'));
+                assert!(!bm.contains(b'b'));
+                assert_eq!(bm.count(), 5);
+            }
+            _ => panic!("Expected Bitmap, got {:?}", strategy),
+        }
+
+        // Larger range should also use Bitmap
+        let strategy = analyze_pattern("[a-z].*", Flags::empty());
+        match strategy {
+            SearchStrategy::Bitmap(bm) => {
+                assert!(bm.contains(b'a'));
+                assert!(bm.contains(b'm'));
+                assert!(bm.contains(b'z'));
+                assert!(!bm.contains(b'A'));
+                assert_eq!(bm.count(), 26);
+            }
+            _ => panic!("Expected Bitmap for [a-z], got {:?}", strategy),
+        }
+    }
+
+    #[test]
+    fn test_bitmap_find() {
+        // Test that Bitmap-based search actually works
+        let re = Regex::new("[aeiou]test").unwrap();
+        let text = "x".repeat(1000) + "atest";
+        let m = re.find(&text).unwrap();
+        assert_eq!(m.as_str(&text), "atest");
+    }
+
+    #[test]
+    fn test_static_bitmaps() {
+        // Verify DIGIT_BITMAP contains 0-9
+        for b in b'0'..=b'9' {
+            assert!(DIGIT_BITMAP.contains(b), "DIGIT_BITMAP should contain '{}'", b as char);
+        }
+        assert!(!DIGIT_BITMAP.contains(b'a'));
+        assert!(!DIGIT_BITMAP.contains(b'/'));
+
+        // Verify WORD_CHAR_BITMAP contains a-z, A-Z, 0-9, _
+        for b in b'a'..=b'z' {
+            assert!(WORD_CHAR_BITMAP.contains(b), "WORD_CHAR should contain '{}'", b as char);
+        }
+        for b in b'A'..=b'Z' {
+            assert!(WORD_CHAR_BITMAP.contains(b), "WORD_CHAR should contain '{}'", b as char);
+        }
+        for b in b'0'..=b'9' {
+            assert!(WORD_CHAR_BITMAP.contains(b), "WORD_CHAR should contain '{}'", b as char);
+        }
+        assert!(WORD_CHAR_BITMAP.contains(b'_'));
+        assert!(!WORD_CHAR_BITMAP.contains(b'-'));
+        assert!(!WORD_CHAR_BITMAP.contains(b' '));
+
+        // Verify WHITESPACE_BITMAP
+        assert!(WHITESPACE_BITMAP.contains(b' '));
+        assert!(WHITESPACE_BITMAP.contains(b'\t'));
+        assert!(WHITESPACE_BITMAP.contains(b'\n'));
+        assert!(WHITESPACE_BITMAP.contains(b'\r'));
+        assert!(!WHITESPACE_BITMAP.contains(b'a'));
+    }
+
+    #[test]
+    fn test_find_digit_branchless() {
+        // Test find_digit with various inputs
+        assert_eq!(find_digit(b"abc123"), Some(3));
+        assert_eq!(find_digit(b"123"), Some(0));
+        assert_eq!(find_digit(b"abc"), None);
+        assert_eq!(find_digit(b""), None);
+
+        // Long string with digit at end
+        let mut long = vec![b'x'; 1000];
+        long.push(b'5');
+        assert_eq!(find_digit(&long), Some(1000));
+    }
+
+    #[test]
+    fn test_strategy_case_insensitive() {
+        // Case insensitive single letter should use TwoBytes
+        let strategy = analyze_pattern("a.*", Flags::from_bits(Flags::IGNORE_CASE));
+        assert!(matches!(strategy, SearchStrategy::TwoBytes(b'a', b'A')));
+    }
+
+    #[test]
+    fn test_strategy_alternation() {
+        let strategy = analyze_pattern("cat|dog", Flags::empty());
+        assert!(matches!(strategy, SearchStrategy::TwoBytes(b'c', b'd')));
+    }
+
+    // ========================================================================
+    // Optimization behavior tests
+    // ========================================================================
+
+    #[test]
+    fn test_optimization_long_input() {
+        let re = Regex::new("needle.*thread").unwrap();
+        let text = "hay".repeat(10000) + "needle and thread here";
+
+        // Should find the match using literal prefix optimization
+        let m = re.find(&text).unwrap();
+        assert_eq!(m.as_str(&text), "needle and thread");
+    }
+
+    #[test]
+    fn test_optimization_no_match() {
+        let re = Regex::new("needle").unwrap();
+        let text = "hay".repeat(1000); // No needle
+
+        // Should return None efficiently
+        assert!(re.find(&text).is_none());
+    }
+
+    #[test]
+    fn test_optimization_multiple_candidates() {
+        // Pattern where prefix matches multiple times but full pattern only matches once
+        let re = Regex::new("hello world").unwrap();
+        let text = "hello there, hello friend, hello world!";
+
+        let m = re.find(text).unwrap();
+        assert_eq!(m.as_str(text), "hello world");
+        assert_eq!(m.start, 27);
+    }
+
+    #[test]
+    fn test_optimization_digit_search() {
+        let re = Regex::new(r"\d+").unwrap();
+        let text = "a".repeat(1000) + "12345";
+
+        let m = re.find(&text).unwrap();
+        assert_eq!(m.as_str(&text), "12345");
+    }
+
+    #[test]
+    fn test_optimization_anchored() {
+        let re = Regex::new("^hello").unwrap();
+
+        // Should only match at start
+        assert!(re.find("hello world").is_some());
+        assert!(re.find("say hello").is_none());
+    }
+
+    #[test]
+    fn test_optimization_alternation() {
+        let re = Regex::new("cat|dog|bird").unwrap();
+        let text = "x".repeat(1000) + "the dog ran";
+
+        let m = re.find(&text).unwrap();
+        assert_eq!(m.as_str(&text), "dog");
     }
 }

@@ -1,0 +1,35 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:  # Manual trigger from GitHub UI
+    inputs:
+      runs:
+        description: 'Number of benchmark runs'
+        default: '1'
+        type: string
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run benchmarks
+        run: |
+          for i in $(seq 1 ${{ inputs.runs }}); do
+            echo "======== Run $i ========"
+            cargo bench --bench interleaved_comparison 2>&1 | tee -a bench-results.txt
+            echo ""
+          done
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_number }}
+          path: bench-results.txt

@@ -11,6 +11,7 @@ categories = ["text-processing"]
 # Core dependencies (temporary - will be eliminated during refinement)
 c2rust-bitfields = "0.21"
 libc = "0.2"
+memchr = "2"
 
 [dev-dependencies]
 criterion = "0.5"
@@ -20,6 +21,26 @@ serde_json = "1"
 
 [[bench]]
 name = "comparison"
+harness = false
+
+[[bench]]
+name = "profile_simple"
+harness = false
+
+[[bench]]
+name = "ab_test"
+harness = false
+
+[[bench]]
+name = "engine_comparison"
+harness = false
+
+[[bench]]
+name = "full_comparison"
+harness = false
+
+[[bench]]
+name = "interleaved_comparison"
 harness = false
 
 [profile.release]
