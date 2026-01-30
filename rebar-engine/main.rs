@@ -2,7 +2,7 @@ use std::io::Write;
 
 use {
     anyhow::Context,
-    lexopt::Arg,
+    lexopt::{Arg, ValueExt},
     quickjs_regex::Regex,
 };
 
@@ -77,8 +77,8 @@ fn find_all(re: &Regex, haystack: &str, mode: Mode) -> usize {
             Some(m) => {
                 count += 1;
                 let (start, end) = match mode {
-                    Mode::Hybrid => (pos + m.start(), pos + m.end()),
-                    _ => (m.start(), m.end()),
+                    Mode::Hybrid => (pos + m.start, pos + m.end),
+                    _ => (m.start, m.end),
                 };
                 pos = if end > start { end } else { start + 1 };
             }
@@ -124,8 +124,8 @@ fn model_count_spans(
             match m {
                 Some(m) => {
                     let (start, end) = match mode {
-                        Mode::Hybrid => (pos + m.start(), pos + m.end()),
-                        _ => (m.start(), m.end()),
+                        Mode::Hybrid => (pos + m.start, pos + m.end),
+                        _ => (m.start, m.end),
                     };
                     sum += end - start;
                     pos = if end > start { end } else { start + 1 };
@@ -147,22 +147,22 @@ fn model_count_captures(
         let mut count = 0;
         let mut pos = 0;
         while pos < haystack.len() {
+            // Note: captures always uses C engine (no pure Rust implementation yet)
             let caps = match mode {
                 Mode::Hybrid => re.captures(&haystack[pos..]),
-                Mode::PureRust => re.captures_at(haystack, pos),
-                Mode::CEngine => re.captures_at_c_engine(haystack, pos),
+                Mode::PureRust | Mode::CEngine => re.captures_at(haystack, pos),
             };
             match caps {
                 Some(caps) => {
                     count += caps.len();
                     if let Some(m) = caps.get(0) {
                         let end = match mode {
-                            Mode::Hybrid => pos + m.end(),
-                            _ => m.end(),
+                            Mode::Hybrid => pos + m.end,
+                            _ => m.end,
                         };
                         let start = match mode {
-                            Mode::Hybrid => pos + m.start(),
-                            _ => m.start(),
+                            Mode::Hybrid => pos + m.start,
+                            _ => m.start,
                         };
                         pos = if end > start { end } else { start + 1 };
                     } else {
@@ -209,22 +209,22 @@ fn model_grep_captures(
         for line in haystack.lines() {
             let mut pos = 0;
             while pos < line.len() {
+                // Note: captures always uses C engine (no pure Rust implementation yet)
                 let caps = match mode {
                     Mode::Hybrid => re.captures(&line[pos..]),
-                    Mode::PureRust => re.captures_at(line, pos),
-                    Mode::CEngine => re.captures_at_c_engine(line, pos),
+                    Mode::PureRust | Mode::CEngine => re.captures_at(line, pos),
                 };
                 match caps {
                     Some(caps) => {
                         count += caps.len();
                         if let Some(m) = caps.get(0) {
                             let end = match mode {
-                                Mode::Hybrid => pos + m.end(),
-                                _ => m.end(),
+                                Mode::Hybrid => pos + m.end,
+                                _ => m.end,
                             };
                             let start = match mode {
-                                Mode::Hybrid => pos + m.start(),
-                                _ => m.start(),
+                                Mode::Hybrid => pos + m.start,
+                                _ => m.start,
                             };
                             pos = if end > start { end } else { start + 1 };
                         } else {
