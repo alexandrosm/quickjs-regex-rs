@@ -246,14 +246,14 @@ impl Regex {
 
         // For short inputs, just use the engine directly
         if len < OPTIMIZATION_THRESHOLD {
-            return self.find_at(text, 0);
+            return self.try_match_at(text, 0).or_else(|| self.find_at_linear(text, 1));
         }
 
         // Use the pre-computed search strategy
         match &self.strategy {
             SearchStrategy::Anchored => {
                 // Only try at position 0
-                self.find_at(text, 0)
+                self.try_match_at(text, 0)
             }
 
             SearchStrategy::AnchoredLiteral(literal) => {
@@ -299,7 +299,7 @@ impl Regex {
             }
 
             SearchStrategy::None => {
-                self.find_at(text, 0)
+                self.find_at_linear(text, 0)
             }
         }
     }
@@ -337,7 +337,7 @@ impl Regex {
         }
     }
 
-    /// Find using single-byte search (fastest)
+    /// Find using single-byte search (fastest) - used by find()
     #[inline]
     fn find_with_single_byte(&self, text: &str, byte: u8) -> Option<Match> {
         let bytes = text.as_bytes();
@@ -345,10 +345,8 @@ impl Regex {
 
         while let Some(pos) = memchr(byte, &bytes[start..]) {
             let abs_pos = start + pos;
-            if let Some(m) = self.find_at(text, abs_pos) {
-                if m.start == abs_pos {
-                    return Some(m);
-                }
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
             }
             start = abs_pos + 1;
             if start >= bytes.len() {
@@ -358,7 +356,7 @@ impl Regex {
         None
     }
 
-    /// Find using two-byte search
+    /// Find using two-byte search - used by find()
     #[inline]
     fn find_with_two_bytes(&self, text: &str, b1: u8, b2: u8) -> Option<Match> {
         let bytes = text.as_bytes();
@@ -366,10 +364,8 @@ impl Regex {
 
         while let Some(pos) = memchr2(b1, b2, &bytes[start..]) {
             let abs_pos = start + pos;
-            if let Some(m) = self.find_at(text, abs_pos) {
-                if m.start == abs_pos {
-                    return Some(m);
-                }
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
             }
             start = abs_pos + 1;
             if start >= bytes.len() {
@@ -379,7 +375,7 @@ impl Regex {
         None
     }
 
-    /// Find using three-byte search
+    /// Find using three-byte search - used by find()
     #[inline]
     fn find_with_three_bytes(&self, text: &str, b1: u8, b2: u8, b3: u8) -> Option<Match> {
         let bytes = text.as_bytes();
@@ -387,10 +383,8 @@ impl Regex {
 
         while let Some(pos) = memchr3(b1, b2, b3, &bytes[start..]) {
             let abs_pos = start + pos;
-            if let Some(m) = self.find_at(text, abs_pos) {
-                if m.start == abs_pos {
-                    return Some(m);
-                }
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
             }
             start = abs_pos + 1;
             if start >= bytes.len() {
@@ -400,23 +394,21 @@ impl Regex {
         None
     }
 
-    /// Find using literal prefix search (memmem)
+    /// Find using literal prefix search (memmem) - used by find()
     #[inline]
     fn find_with_literal_prefix(&self, text: &str, prefix: &[u8]) -> Option<Match> {
         let finder = memmem::Finder::new(prefix);
         let bytes = text.as_bytes();
 
         for pos in finder.find_iter(bytes) {
-            if let Some(m) = self.find_at(text, pos) {
-                if m.start == pos {
-                    return Some(m);
-                }
+            if let Some(m) = self.try_match_at(text, pos) {
+                return Some(m);
             }
         }
         None
     }
 
-    /// Find using bitmap-based byte set search (for character classes)
+    /// Find using bitmap-based byte set search (for character classes) - used by find()
     #[inline]
     fn find_with_bitmap(&self, text: &str, bitmap: &ByteBitmap) -> Option<Match> {
         let bytes = text.as_bytes();
@@ -424,10 +416,8 @@ impl Regex {
 
         while let Some(pos) = bitmap.find_in_slice(&bytes[start..]) {
             let abs_pos = start + pos;
-            if let Some(m) = self.find_at(text, abs_pos) {
-                if m.start == abs_pos {
-                    return Some(m);
-                }
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
             }
             start = abs_pos + 1;
             if start >= bytes.len() {
@@ -437,20 +427,17 @@ impl Regex {
         None
     }
 
-    /// Find by scanning for digits (0-9)
+    /// Find by scanning for digits (0-9) - used by find()
     #[inline]
     fn find_with_digit_scan(&self, text: &str) -> Option<Match> {
         let bytes = text.as_bytes();
         let mut start = 0;
 
         while start < bytes.len() {
-            // Find next digit using memchr3 for common digits, then check others
             if let Some(pos) = find_digit(&bytes[start..]) {
                 let abs_pos = start + pos;
-                if let Some(m) = self.find_at(text, abs_pos) {
-                    if m.start == abs_pos {
-                        return Some(m);
-                    }
+                if let Some(m) = self.try_match_at(text, abs_pos) {
+                    return Some(m);
                 }
                 start = abs_pos + 1;
             } else {
@@ -460,7 +447,7 @@ impl Regex {
         None
     }
 
-    /// Find by scanning for word characters
+    /// Find by scanning for word characters - used by find()
     #[inline]
     fn find_with_word_char_scan(&self, text: &str) -> Option<Match> {
         let bytes = text.as_bytes();
@@ -469,10 +456,8 @@ impl Regex {
         while start < bytes.len() {
             if let Some(pos) = find_word_char(&bytes[start..]) {
                 let abs_pos = start + pos;
-                if let Some(m) = self.find_at(text, abs_pos) {
-                    if m.start == abs_pos {
-                        return Some(m);
-                    }
+                if let Some(m) = self.try_match_at(text, abs_pos) {
+                    return Some(m);
                 }
                 start = abs_pos + 1;
             } else {
@@ -482,7 +467,7 @@ impl Regex {
         None
     }
 
-    /// Find by scanning for whitespace (branchless using bitmap)
+    /// Find by scanning for whitespace (branchless using bitmap) - used by find()
     #[inline]
     fn find_with_whitespace_scan(&self, text: &str) -> Option<Match> {
         let bytes = text.as_bytes();
@@ -490,10 +475,8 @@ impl Regex {
 
         while let Some(pos) = find_whitespace(&bytes[start..]) {
             let abs_pos = start + pos;
-            if let Some(m) = self.find_at(text, abs_pos) {
-                if m.start == abs_pos {
-                    return Some(m);
-                }
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
             }
             start = abs_pos + 1;
             if start >= bytes.len() {
@@ -503,9 +486,90 @@ impl Regex {
         None
     }
 
-    /// Find a match starting at the given byte offset
-    /// Uses the pure Rust interpreter - no C code!
+    /// Find a match starting at or after the given byte offset.
+    /// Uses memchr scanning based on SearchStrategy for fast candidate position finding.
+    /// This is the key optimization that makes pure-rust competitive with hybrid.
     pub fn find_at(&self, text: &str, start: usize) -> Option<Match> {
+        let text_bytes = text.as_bytes();
+        let len = text_bytes.len();
+
+        // For short remaining text, just use linear scan
+        if len.saturating_sub(start) < OPTIMIZATION_THRESHOLD {
+            return self.find_at_linear(text, start);
+        }
+
+        match &self.strategy {
+            SearchStrategy::Anchored => {
+                // Only try at position 0
+                if start == 0 {
+                    self.try_match_at(text, 0)
+                } else {
+                    None
+                }
+            }
+
+            SearchStrategy::AnchoredLiteral(literal) => {
+                // Fast path: ^literal - just check prefix at start
+                if start == 0 {
+                    self.find_anchored_literal(text, literal)
+                } else {
+                    None
+                }
+            }
+
+            SearchStrategy::PureLiteral(literal) => {
+                // Direct memmem search - no interpreter needed!
+                if literal.len() == 1 {
+                    memchr(literal[0], &text_bytes[start..])
+                        .map(|pos| Match { start: start + pos, end: start + pos + 1 })
+                } else {
+                    memmem::find(&text_bytes[start..], literal)
+                        .map(|pos| Match { start: start + pos, end: start + pos + literal.len() })
+                }
+            }
+
+            SearchStrategy::SingleByte(b) => {
+                self.find_at_single_byte(text, start, *b)
+            }
+
+            SearchStrategy::TwoBytes(b1, b2) => {
+                self.find_at_two_bytes(text, start, *b1, *b2)
+            }
+
+            SearchStrategy::ThreeBytes(b1, b2, b3) => {
+                self.find_at_three_bytes(text, start, *b1, *b2, *b3)
+            }
+
+            SearchStrategy::LiteralPrefix(prefix) => {
+                self.find_at_literal_prefix(text, start, prefix)
+            }
+
+            SearchStrategy::Bitmap(bitmap) => {
+                self.find_at_bitmap(text, start, bitmap)
+            }
+
+            SearchStrategy::Digit => {
+                self.find_at_digit(text, start)
+            }
+
+            SearchStrategy::WordChar => {
+                self.find_at_word_char(text, start)
+            }
+
+            SearchStrategy::Whitespace => {
+                self.find_at_whitespace(text, start)
+            }
+
+            SearchStrategy::None => {
+                self.find_at_linear(text, start)
+            }
+        }
+    }
+
+    /// Try to match at an exact position (no scanning).
+    /// This is the internal method that runs the interpreter at a specific offset.
+    #[inline]
+    fn try_match_at(&self, text: &str, pos: usize) -> Option<Match> {
         let text_bytes = text.as_bytes();
 
         // SAFETY: bytecode is valid from constructor
@@ -515,7 +579,7 @@ impl Regex {
 
         let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
 
-        match ctx.exec(start) {
+        match ctx.exec(pos) {
             interpreter::ExecResult::Match => {
                 // Extract match from captures
                 if let (Some(match_start), Some(match_end)) = (
@@ -534,6 +598,151 @@ impl Regex {
         }
     }
 
+    /// Find match using single-byte memchr scanning
+    #[inline]
+    fn find_at_single_byte(&self, text: &str, start: usize, byte: u8) -> Option<Match> {
+        let bytes = &text.as_bytes()[start..];
+        let mut offset = 0;
+
+        while let Some(pos) = memchr(byte, &bytes[offset..]) {
+            let abs_pos = start + offset + pos;
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
+            }
+            offset += pos + 1;
+        }
+        None
+    }
+
+    /// Find match using two-byte memchr scanning
+    #[inline]
+    fn find_at_two_bytes(&self, text: &str, start: usize, b1: u8, b2: u8) -> Option<Match> {
+        let bytes = &text.as_bytes()[start..];
+        let mut offset = 0;
+
+        while let Some(pos) = memchr2(b1, b2, &bytes[offset..]) {
+            let abs_pos = start + offset + pos;
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
+            }
+            offset += pos + 1;
+        }
+        None
+    }
+
+    /// Find match using three-byte memchr scanning
+    #[inline]
+    fn find_at_three_bytes(&self, text: &str, start: usize, b1: u8, b2: u8, b3: u8) -> Option<Match> {
+        let bytes = &text.as_bytes()[start..];
+        let mut offset = 0;
+
+        while let Some(pos) = memchr3(b1, b2, b3, &bytes[offset..]) {
+            let abs_pos = start + offset + pos;
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
+            }
+            offset += pos + 1;
+        }
+        None
+    }
+
+    /// Find match using literal prefix memmem scanning
+    #[inline]
+    fn find_at_literal_prefix(&self, text: &str, start: usize, prefix: &[u8]) -> Option<Match> {
+        let bytes = &text.as_bytes()[start..];
+        let finder = memmem::Finder::new(prefix);
+
+        for pos in finder.find_iter(bytes) {
+            let abs_pos = start + pos;
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
+            }
+        }
+        None
+    }
+
+    /// Find match using bitmap scanning for character classes
+    #[inline]
+    fn find_at_bitmap(&self, text: &str, start: usize, bitmap: &ByteBitmap) -> Option<Match> {
+        let bytes = &text.as_bytes()[start..];
+        let mut offset = 0;
+
+        while let Some(pos) = bitmap.find_in_slice(&bytes[offset..]) {
+            let abs_pos = start + offset + pos;
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
+            }
+            offset += pos + 1;
+        }
+        None
+    }
+
+    /// Find match by scanning for digits
+    #[inline]
+    fn find_at_digit(&self, text: &str, start: usize) -> Option<Match> {
+        let bytes = &text.as_bytes()[start..];
+        let mut offset = 0;
+
+        while let Some(pos) = find_digit(&bytes[offset..]) {
+            let abs_pos = start + offset + pos;
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
+            }
+            offset += pos + 1;
+        }
+        None
+    }
+
+    /// Find match by scanning for word characters
+    #[inline]
+    fn find_at_word_char(&self, text: &str, start: usize) -> Option<Match> {
+        let bytes = &text.as_bytes()[start..];
+        let mut offset = 0;
+
+        while let Some(pos) = find_word_char(&bytes[offset..]) {
+            let abs_pos = start + offset + pos;
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
+            }
+            offset += pos + 1;
+        }
+        None
+    }
+
+    /// Find match by scanning for whitespace
+    #[inline]
+    fn find_at_whitespace(&self, text: &str, start: usize) -> Option<Match> {
+        let bytes = &text.as_bytes()[start..];
+        let mut offset = 0;
+
+        while let Some(pos) = find_whitespace(&bytes[offset..]) {
+            let abs_pos = start + offset + pos;
+            if let Some(m) = self.try_match_at(text, abs_pos) {
+                return Some(m);
+            }
+            offset += pos + 1;
+        }
+        None
+    }
+
+    /// Fallback: Linear scan trying every position from start
+    #[inline]
+    fn find_at_linear(&self, text: &str, start: usize) -> Option<Match> {
+        let mut pos = start;
+        while pos <= text.len() {
+            if let Some(m) = self.try_match_at(text, pos) {
+                return Some(m);
+            }
+            // Advance by one UTF-8 char
+            if pos < text.len() {
+                pos += text[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
     /// Find a match using the original C engine (for benchmarking comparison)
     /// This uses the c2rust-transpiled lre_exec function
     #[doc(hidden)]
@@ -545,17 +754,16 @@ impl Regex {
         let mut captures: Vec<*mut u8> = vec![std::ptr::null_mut(); capture_count * 2];
 
         // Call the C engine
-        let ret = unsafe {
-            engine::lre_exec(
-                captures.as_mut_ptr(),
-                self.bytecode,
-                text_bytes.as_ptr(),
-                start as i32,
-                text_bytes.len() as i32,
-                0, // cbuf_type = 8-bit
-                std::ptr::null_mut(), // opaque
-            )
-        };
+        // Note: lre_exec is not marked unsafe despite taking raw pointers (c2rust artifact)
+        let ret = engine::lre_exec(
+            captures.as_mut_ptr(),
+            self.bytecode,
+            text_bytes.as_ptr(),
+            start as i32,
+            text_bytes.len() as i32,
+            0, // cbuf_type = 8-bit
+            std::ptr::null_mut(), // opaque
+        );
 
         if ret == 1 {
             // Match found - extract positions
