@@ -168,6 +168,21 @@ enum SearchStrategy {
     WordChar,
     /// Search for whitespace
     Whitespace,
+    // === PURE FAST PATHS - No interpreter needed! ===
+    /// Pure [0-9]+ or \d+ - scan consecutive digits directly
+    PureDigitPlus,
+    /// Pure [a-z]+ - scan consecutive lowercase letters
+    PureLowerPlus,
+    /// Pure [A-Z]+ - scan consecutive uppercase letters
+    PureUpperPlus,
+    /// Pure [a-zA-Z]+ - scan consecutive letters
+    PureAlphaPlus,
+    /// Pure [a-zA-Z0-9]+ - scan consecutive alphanumerics
+    PureAlnumPlus,
+    /// Pure \w+ or [a-zA-Z0-9_]+ - scan consecutive word chars
+    PureWordPlus,
+    /// Pure "[^"]*" - scan quoted strings directly
+    QuotedString(u8), // the quote character
     /// No optimization available - scan every position
     None,
 }
@@ -191,6 +206,13 @@ impl std::fmt::Debug for SearchStrategy {
             SearchStrategy::Digit => write!(f, "Digit"),
             SearchStrategy::WordChar => write!(f, "WordChar"),
             SearchStrategy::Whitespace => write!(f, "Whitespace"),
+            SearchStrategy::PureDigitPlus => write!(f, "PureDigitPlus"),
+            SearchStrategy::PureLowerPlus => write!(f, "PureLowerPlus"),
+            SearchStrategy::PureUpperPlus => write!(f, "PureUpperPlus"),
+            SearchStrategy::PureAlphaPlus => write!(f, "PureAlphaPlus"),
+            SearchStrategy::PureAlnumPlus => write!(f, "PureAlnumPlus"),
+            SearchStrategy::PureWordPlus => write!(f, "PureWordPlus"),
+            SearchStrategy::QuotedString(q) => write!(f, "QuotedString({:?})", *q as char),
             SearchStrategy::None => write!(f, "None"),
         }
     }
@@ -336,6 +358,35 @@ impl Regex {
 
             SearchStrategy::Whitespace => {
                 self.find_with_whitespace_scan(text)
+            }
+
+            // === PURE FAST PATHS - No interpreter needed! ===
+            SearchStrategy::PureDigitPlus => {
+                find_digit_run(text.as_bytes(), 0)
+            }
+
+            SearchStrategy::PureLowerPlus => {
+                find_lower_run(text.as_bytes(), 0)
+            }
+
+            SearchStrategy::PureUpperPlus => {
+                find_upper_run(text.as_bytes(), 0)
+            }
+
+            SearchStrategy::PureAlphaPlus => {
+                find_alpha_run(text.as_bytes(), 0)
+            }
+
+            SearchStrategy::PureAlnumPlus => {
+                find_alnum_run(text.as_bytes(), 0)
+            }
+
+            SearchStrategy::PureWordPlus => {
+                find_word_run(text.as_bytes(), 0)
+            }
+
+            SearchStrategy::QuotedString(quote) => {
+                find_quoted_string(text.as_bytes(), 0, *quote)
             }
 
             SearchStrategy::None => {
@@ -654,6 +705,35 @@ impl Regex {
 
             SearchStrategy::Whitespace => {
                 self.find_at_whitespace(text, start)
+            }
+
+            // === PURE FAST PATHS - No interpreter needed! ===
+            SearchStrategy::PureDigitPlus => {
+                find_digit_run(text_bytes, start)
+            }
+
+            SearchStrategy::PureLowerPlus => {
+                find_lower_run(text_bytes, start)
+            }
+
+            SearchStrategy::PureUpperPlus => {
+                find_upper_run(text_bytes, start)
+            }
+
+            SearchStrategy::PureAlphaPlus => {
+                find_alpha_run(text_bytes, start)
+            }
+
+            SearchStrategy::PureAlnumPlus => {
+                find_alnum_run(text_bytes, start)
+            }
+
+            SearchStrategy::PureWordPlus => {
+                find_word_run(text_bytes, start)
+            }
+
+            SearchStrategy::QuotedString(quote) => {
+                find_quoted_string(text_bytes, start, *quote)
             }
 
             SearchStrategy::None => {
@@ -1289,8 +1369,60 @@ impl<'r, 't> Iterator for Matches<'r, 't> {
 // Pattern Analysis - determines optimal search strategy
 // ============================================================================
 
+/// Detect patterns that can be handled with pure fast paths (no interpreter!)
+/// These patterns are common and can be matched much faster with specialized code.
+fn detect_pure_pattern(pattern: &str) -> Option<SearchStrategy> {
+    // Check for \d+ or [0-9]+
+    if pattern == r"\d+" || pattern == "[0-9]+" {
+        return Some(SearchStrategy::PureDigitPlus);
+    }
+
+    // Check for \w+ or [a-zA-Z0-9_]+
+    if pattern == r"\w+" || pattern == "[a-zA-Z0-9_]+" || pattern == "[_a-zA-Z0-9]+" {
+        return Some(SearchStrategy::PureWordPlus);
+    }
+
+    // Check for [a-z]+
+    if pattern == "[a-z]+" {
+        return Some(SearchStrategy::PureLowerPlus);
+    }
+
+    // Check for [A-Z]+
+    if pattern == "[A-Z]+" {
+        return Some(SearchStrategy::PureUpperPlus);
+    }
+
+    // Check for [a-zA-Z]+ or [A-Za-z]+
+    if pattern == "[a-zA-Z]+" || pattern == "[A-Za-z]+" {
+        return Some(SearchStrategy::PureAlphaPlus);
+    }
+
+    // Check for [a-zA-Z0-9]+ or similar
+    if pattern == "[a-zA-Z0-9]+" || pattern == "[0-9a-zA-Z]+" ||
+       pattern == "[A-Za-z0-9]+" || pattern == "[0-9A-Za-z]+" {
+        return Some(SearchStrategy::PureAlnumPlus);
+    }
+
+    // Check for quoted string patterns: "[^"]*" or '[^']*'
+    if pattern == r#""[^"]*""# {
+        return Some(SearchStrategy::QuotedString(b'"'));
+    }
+    if pattern == r"'[^']*'" {
+        return Some(SearchStrategy::QuotedString(b'\''));
+    }
+
+    None
+}
+
 /// Analyze a pattern to determine the best search strategy.
 fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
+    // First, check for pure fast-path patterns (no interpreter needed!)
+    if !flags.is_ignore_case() {
+        if let Some(strategy) = detect_pure_pattern(pattern) {
+            return strategy;
+        }
+    }
+
     let mut chars = pattern.chars().peekable();
 
     // Check for start anchor
@@ -1898,6 +2030,145 @@ fn find_whitespace(bytes: &[u8]) -> Option<usize> {
     memchr3(b' ', b'\t', b'\n', bytes)
 }
 
+// ============================================================================
+// PURE FAST PATHS - Complete pattern matching without interpreter
+// ============================================================================
+
+/// Find a run of consecutive digits [0-9]+ starting at or after `start`
+/// Returns the match directly - NO INTERPRETER NEEDED!
+#[inline]
+fn find_digit_run(bytes: &[u8], start: usize) -> Option<Match> {
+    let slice = &bytes[start..];
+
+    // Find the first digit
+    let first = DIGIT_BITMAP.find_in_slice(slice)?;
+    let abs_start = start + first;
+
+    // Scan forward to find the end of the digit run
+    let mut end = abs_start + 1;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+
+    Some(Match { start: abs_start, end })
+}
+
+/// Find a run of consecutive lowercase letters [a-z]+ starting at or after `start`
+#[inline]
+fn find_lower_run(bytes: &[u8], start: usize) -> Option<Match> {
+    // Find the first lowercase letter
+    let mut pos = start;
+    while pos < bytes.len() {
+        if bytes[pos].is_ascii_lowercase() {
+            // Found start, now find end
+            let match_start = pos;
+            pos += 1;
+            while pos < bytes.len() && bytes[pos].is_ascii_lowercase() {
+                pos += 1;
+            }
+            return Some(Match { start: match_start, end: pos });
+        }
+        pos += 1;
+    }
+    None
+}
+
+/// Find a run of consecutive uppercase letters [A-Z]+ starting at or after `start`
+#[inline]
+fn find_upper_run(bytes: &[u8], start: usize) -> Option<Match> {
+    let mut pos = start;
+    while pos < bytes.len() {
+        if bytes[pos].is_ascii_uppercase() {
+            let match_start = pos;
+            pos += 1;
+            while pos < bytes.len() && bytes[pos].is_ascii_uppercase() {
+                pos += 1;
+            }
+            return Some(Match { start: match_start, end: pos });
+        }
+        pos += 1;
+    }
+    None
+}
+
+/// Find a run of consecutive letters [a-zA-Z]+ starting at or after `start`
+#[inline]
+fn find_alpha_run(bytes: &[u8], start: usize) -> Option<Match> {
+    let mut pos = start;
+    while pos < bytes.len() {
+        if bytes[pos].is_ascii_alphabetic() {
+            let match_start = pos;
+            pos += 1;
+            while pos < bytes.len() && bytes[pos].is_ascii_alphabetic() {
+                pos += 1;
+            }
+            return Some(Match { start: match_start, end: pos });
+        }
+        pos += 1;
+    }
+    None
+}
+
+/// Find a run of consecutive alphanumeric chars [a-zA-Z0-9]+ starting at or after `start`
+#[inline]
+fn find_alnum_run(bytes: &[u8], start: usize) -> Option<Match> {
+    let mut pos = start;
+    while pos < bytes.len() {
+        if bytes[pos].is_ascii_alphanumeric() {
+            let match_start = pos;
+            pos += 1;
+            while pos < bytes.len() && bytes[pos].is_ascii_alphanumeric() {
+                pos += 1;
+            }
+            return Some(Match { start: match_start, end: pos });
+        }
+        pos += 1;
+    }
+    None
+}
+
+/// Find a run of consecutive word chars [a-zA-Z0-9_]+ or \w+ starting at or after `start`
+#[inline]
+fn find_word_run(bytes: &[u8], start: usize) -> Option<Match> {
+    let slice = &bytes[start..];
+
+    // Find the first word char using bitmap
+    let first = WORD_CHAR_BITMAP.find_in_slice(slice)?;
+    let abs_start = start + first;
+
+    // Scan forward to find the end of the word run
+    let mut end = abs_start + 1;
+    while end < bytes.len() {
+        let b = bytes[end];
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+
+    Some(Match { start: abs_start, end })
+}
+
+/// Find a quoted string "[^"]*" or '[^']*' starting at or after `start`
+/// This directly finds the opening quote, scans for closing quote, returns match.
+#[inline]
+fn find_quoted_string(bytes: &[u8], start: usize, quote: u8) -> Option<Match> {
+    let slice = &bytes[start..];
+
+    // Find the opening quote
+    let open_pos = memchr(quote, slice)?;
+    let abs_open = start + open_pos;
+
+    // Find the closing quote (starting after the opening quote)
+    let rest = &bytes[abs_open + 1..];
+    let close_offset = memchr(quote, rest)?;
+    let abs_close = abs_open + 1 + close_offset;
+
+    // Match includes both quotes
+    Some(Match { start: abs_open, end: abs_close + 1 })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2148,13 +2419,23 @@ mod tests {
 
     #[test]
     fn test_strategy_digit() {
+        // \d+ now uses PureDigitPlus (fast path, no interpreter!)
         let strategy = analyze_pattern(r"\d+", Flags::empty());
+        assert!(matches!(strategy, SearchStrategy::PureDigitPlus));
+
+        // Single \d without + still uses Digit
+        let strategy = analyze_pattern(r"\d", Flags::empty());
         assert!(matches!(strategy, SearchStrategy::Digit));
     }
 
     #[test]
     fn test_strategy_word_char() {
+        // \w+ now uses PureWordPlus (fast path, no interpreter!)
         let strategy = analyze_pattern(r"\w+", Flags::empty());
+        assert!(matches!(strategy, SearchStrategy::PureWordPlus));
+
+        // Single \w without + still uses WordChar
+        let strategy = analyze_pattern(r"\w", Flags::empty());
         assert!(matches!(strategy, SearchStrategy::WordChar));
     }
 
