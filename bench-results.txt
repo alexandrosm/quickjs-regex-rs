@@ -1,0 +1,905 @@
+[1m[92m    Updating[0m crates.io index
+[1m[92m   Compiling[0m proc-macro2 v1.0.106
+[1m[92m   Compiling[0m unicode-ident v1.0.22
+[1m[92m   Compiling[0m quote v1.0.44
+[1m[92m   Compiling[0m crossbeam-utils v0.8.21
+[1m[92m   Compiling[0m serde_core v1.0.228
+[1m[92m   Compiling[0m zerocopy v0.8.35
+[1m[92m   Compiling[0m zmij v1.0.17
+[1m[92m   Compiling[0m memchr v2.7.6
+[1m[92m   Compiling[0m syn v2.0.114
+[1m[92m   Compiling[0m serde v1.0.228
+[1m[92m   Compiling[0m autocfg v1.5.0
+[1m[92m   Compiling[0m libc v0.2.180
+[1m[92m   Compiling[0m crossbeam-epoch v0.9.18
+[1m[92m   Compiling[0m num-traits v0.2.19
+[1m[92m   Compiling[0m either v1.15.0
+[1m[92m   Compiling[0m rayon-core v1.13.0
+[1m[92m   Compiling[0m cfg-if v1.0.4
+[1m[92m   Compiling[0m serde_json v1.0.149
+[1m[92m   Compiling[0m crossbeam-deque v0.8.6
+[1m[92m   Compiling[0m plotters-backend v0.3.7
+[1m[92m   Compiling[0m itoa v1.0.17
+[1m[92m   Compiling[0m anstyle v1.0.13
+[1m[92m   Compiling[0m regex-syntax v0.8.8
+[1m[92m   Compiling[0m ciborium-io v0.2.2
+[1m[92m   Compiling[0m clap_lex v0.7.7
+[1m[92m   Compiling[0m clap_builder v4.5.55
+[1m[92m   Compiling[0m plotters-svg v0.3.7
+[1m[92m   Compiling[0m zerocopy-derive v0.8.35
+[1m[92m   Compiling[0m serde_derive v1.0.228
+[1m[92m   Compiling[0m c2rust-bitfields-derive v0.21.0
+[1m[92m   Compiling[0m regex-automata v0.4.13
+[1m[92m   Compiling[0m itertools v0.10.5
+[1m[92m   Compiling[0m cast v0.3.0
+[1m[92m   Compiling[0m allocator-api2 v0.2.21
+[1m[92m   Compiling[0m equivalent v1.0.2
+[1m[92m   Compiling[0m same-file v1.0.6
+[1m[92m   Compiling[0m foldhash v0.2.0
+[1m[92m   Compiling[0m walkdir v2.5.0
+[1m[92m   Compiling[0m half v2.7.1
+[1m[92m   Compiling[0m hashbrown v0.16.1
+[1m[92m   Compiling[0m ciborium-ll v0.2.2
+[1m[92m   Compiling[0m criterion-plot v0.5.0
+[1m[92m   Compiling[0m rayon v1.11.0
+[1m[92m   Compiling[0m ciborium v0.2.2
+[1m[92m   Compiling[0m plotters v0.3.7
+[1m[92m   Compiling[0m tinytemplate v1.2.1
+[1m[92m   Compiling[0m regex v1.12.2
+[1m[92m   Compiling[0m c2rust-bitfields v0.21.0
+[1m[92m   Compiling[0m clap v4.5.55
+[1m[92m   Compiling[0m is-terminal v0.4.17
+[1m[92m   Compiling[0m oorandom v11.1.5
+[1m[92m   Compiling[0m anes v0.1.6
+[1m[92m   Compiling[0m once_cell v1.21.3
+[1m[92m   Compiling[0m quickjs-regex v0.1.0 (/home/runner/work/quickjs-regex-rs/quickjs-regex-rs)
+[1m[92m   Compiling[0m regress v0.10.5
+[1m[92m   Compiling[0m criterion v0.5.1
+[1m[33mwarning[0m[1m: unnecessary `unsafe` block[0m
+   [1m[94m--> [0msrc/regex/mod.rs:548:19
+    [1m[94m|[0m
+[1m[94m548[0m [1m[94m|[0m         let ret = unsafe {
+    [1m[94m|[0m                   [1m[33m^^^^^^[0m [1m[33munnecessary `unsafe` block[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m: `quickjs-regex` (lib) generated 1 warning
+[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 57.14s
+[1m[92m     Running[0m benches/interleaved_comparison.rs (target/release/deps/interleaved_comparison-dc477295fd6fa52c)
+Gnuplot not found, using plotters backend
+Benchmarking basic_interleaved/1_hybrid/literal
+Benchmarking basic_interleaved/1_hybrid/literal: Warming up for 3.0000 s
+Benchmarking basic_interleaved/1_hybrid/literal: Collecting 100 samples in estimated 5.0003 s (67M iterations)
+Benchmarking basic_interleaved/1_hybrid/literal: Analyzing
+basic_interleaved/1_hybrid/literal
+                        time:   [74.357 ns 74.435 ns 74.578 ns]
+Found 12 outliers among 100 measurements (12.00%)
+  6 (6.00%) high mild
+  6 (6.00%) high severe
+Benchmarking basic_interleaved/2_pure_rust/literal
+Benchmarking basic_interleaved/2_pure_rust/literal: Warming up for 3.0000 s
+Benchmarking basic_interleaved/2_pure_rust/literal: Collecting 100 samples in estimated 5.0001 s (61M iterations)
+Benchmarking basic_interleaved/2_pure_rust/literal: Analyzing
+basic_interleaved/2_pure_rust/literal
+                        time:   [82.224 ns 82.544 ns 83.146 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking basic_interleaved/3_c_engine/literal
+Benchmarking basic_interleaved/3_c_engine/literal: Warming up for 3.0000 s
+Benchmarking basic_interleaved/3_c_engine/literal: Collecting 100 samples in estimated 5.0005 s (26M iterations)
+Benchmarking basic_interleaved/3_c_engine/literal: Analyzing
+basic_interleaved/3_c_engine/literal
+                        time:   [186.91 ns 187.08 ns 187.37 ns]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking basic_interleaved/4_regress/literal
+Benchmarking basic_interleaved/4_regress/literal: Warming up for 3.0000 s
+Benchmarking basic_interleaved/4_regress/literal: Collecting 100 samples in estimated 5.0001 s (148M iterations)
+Benchmarking basic_interleaved/4_regress/literal: Analyzing
+basic_interleaved/4_regress/literal
+                        time:   [33.535 ns 33.574 ns 33.623 ns]
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+Benchmarking basic_interleaved/1_hybrid/digits
+Benchmarking basic_interleaved/1_hybrid/digits: Warming up for 3.0000 s
+Benchmarking basic_interleaved/1_hybrid/digits: Collecting 100 samples in estimated 5.0001 s (32M iterations)
+Benchmarking basic_interleaved/1_hybrid/digits: Analyzing
+basic_interleaved/1_hybrid/digits
+                        time:   [154.04 ns 154.13 ns 154.22 ns]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking basic_interleaved/2_pure_rust/digits
+Benchmarking basic_interleaved/2_pure_rust/digits: Warming up for 3.0000 s
+Benchmarking basic_interleaved/2_pure_rust/digits: Collecting 100 samples in estimated 5.0003 s (33M iterations)
+Benchmarking basic_interleaved/2_pure_rust/digits: Analyzing
+basic_interleaved/2_pure_rust/digits
+                        time:   [153.35 ns 153.47 ns 153.59 ns]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+Benchmarking basic_interleaved/3_c_engine/digits
+Benchmarking basic_interleaved/3_c_engine/digits: Warming up for 3.0000 s
+Benchmarking basic_interleaved/3_c_engine/digits: Collecting 100 samples in estimated 5.0034 s (3.5M iterations)
+Benchmarking basic_interleaved/3_c_engine/digits: Analyzing
+basic_interleaved/3_c_engine/digits
+                        time:   [1.4216 µs 1.4243 µs 1.4282 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking basic_interleaved/4_regress/digits
+Benchmarking basic_interleaved/4_regress/digits: Warming up for 3.0000 s
+Benchmarking basic_interleaved/4_regress/digits: Collecting 100 samples in estimated 5.0002 s (55M iterations)
+Benchmarking basic_interleaved/4_regress/digits: Analyzing
+basic_interleaved/4_regress/digits
+                        time:   [90.347 ns 90.402 ns 90.469 ns]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking basic_interleaved/1_hybrid/word
+Benchmarking basic_interleaved/1_hybrid/word: Warming up for 3.0000 s
+Benchmarking basic_interleaved/1_hybrid/word: Collecting 100 samples in estimated 5.0006 s (40M iterations)
+Benchmarking basic_interleaved/1_hybrid/word: Analyzing
+basic_interleaved/1_hybrid/word
+                        time:   [124.93 ns 125.07 ns 125.27 ns]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking basic_interleaved/2_pure_rust/word
+Benchmarking basic_interleaved/2_pure_rust/word: Warming up for 3.0000 s
+Benchmarking basic_interleaved/2_pure_rust/word: Collecting 100 samples in estimated 5.0002 s (40M iterations)
+Benchmarking basic_interleaved/2_pure_rust/word: Analyzing
+basic_interleaved/2_pure_rust/word
+                        time:   [124.53 ns 124.63 ns 124.75 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) low mild
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking basic_interleaved/3_c_engine/word
+Benchmarking basic_interleaved/3_c_engine/word: Warming up for 3.0000 s
+Benchmarking basic_interleaved/3_c_engine/word: Collecting 100 samples in estimated 5.0008 s (4.7M iterations)
+Benchmarking basic_interleaved/3_c_engine/word: Analyzing
+basic_interleaved/3_c_engine/word
+                        time:   [1.0587 µs 1.0594 µs 1.0601 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking basic_interleaved/4_regress/word
+Benchmarking basic_interleaved/4_regress/word: Warming up for 3.0000 s
+Benchmarking basic_interleaved/4_regress/word: Collecting 100 samples in estimated 5.0003 s (57M iterations)
+Benchmarking basic_interleaved/4_regress/word: Analyzing
+basic_interleaved/4_regress/word
+                        time:   [87.254 ns 87.318 ns 87.406 ns]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking basic_interleaved/1_hybrid/alternation
+Benchmarking basic_interleaved/1_hybrid/alternation: Warming up for 3.0000 s
+Benchmarking basic_interleaved/1_hybrid/alternation: Collecting 100 samples in estimated 5.0016 s (14M iterations)
+Benchmarking basic_interleaved/1_hybrid/alternation: Analyzing
+basic_interleaved/1_hybrid/alternation
+                        time:   [352.99 ns 353.57 ns 354.06 ns]
+Benchmarking basic_interleaved/2_pure_rust/alternation
+Benchmarking basic_interleaved/2_pure_rust/alternation: Warming up for 3.0000 s
+Benchmarking basic_interleaved/2_pure_rust/alternation: Collecting 100 samples in estimated 5.0017 s (14M iterations)
+Benchmarking basic_interleaved/2_pure_rust/alternation: Analyzing
+basic_interleaved/2_pure_rust/alternation
+                        time:   [350.03 ns 350.28 ns 350.62 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+Benchmarking basic_interleaved/3_c_engine/alternation
+Benchmarking basic_interleaved/3_c_engine/alternation: Warming up for 3.0000 s
+Benchmarking basic_interleaved/3_c_engine/alternation: Collecting 100 samples in estimated 5.0178 s (1.1M iterations)
+Benchmarking basic_interleaved/3_c_engine/alternation: Analyzing
+basic_interleaved/3_c_engine/alternation
+                        time:   [4.5146 µs 4.5182 µs 4.5226 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking basic_interleaved/4_regress/alternation
+Benchmarking basic_interleaved/4_regress/alternation: Warming up for 3.0000 s
+Benchmarking basic_interleaved/4_regress/alternation: Collecting 100 samples in estimated 5.0000 s (59M iterations)
+Benchmarking basic_interleaved/4_regress/alternation: Analyzing
+basic_interleaved/4_regress/alternation
+                        time:   [84.472 ns 84.527 ns 84.591 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) high mild
+  7 (7.00%) high severe
+
+Benchmarking late_match_interleaved/1_hybrid/100
+Benchmarking late_match_interleaved/1_hybrid/100: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/1_hybrid/100: Collecting 100 samples in estimated 5.0002 s (93M iterations)
+Benchmarking late_match_interleaved/1_hybrid/100: Analyzing
+late_match_interleaved/1_hybrid/100
+                        time:   [53.704 ns 53.728 ns 53.753 ns]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking late_match_interleaved/2_pure_rust/100
+Benchmarking late_match_interleaved/2_pure_rust/100: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/2_pure_rust/100: Collecting 100 samples in estimated 5.0020 s (2.7M iterations)
+Benchmarking late_match_interleaved/2_pure_rust/100: Analyzing
+late_match_interleaved/2_pure_rust/100
+                        time:   [1.9080 µs 1.9141 µs 1.9201 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking late_match_interleaved/3_c_engine/100
+Benchmarking late_match_interleaved/3_c_engine/100: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/3_c_engine/100: Collecting 100 samples in estimated 5.0370 s (227k iterations)
+Benchmarking late_match_interleaved/3_c_engine/100: Analyzing
+late_match_interleaved/3_c_engine/100
+                        time:   [21.944 µs 21.952 µs 21.959 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking late_match_interleaved/4_regress/100
+Benchmarking late_match_interleaved/4_regress/100: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/4_regress/100: Collecting 100 samples in estimated 5.0001 s (137M iterations)
+Benchmarking late_match_interleaved/4_regress/100: Analyzing
+late_match_interleaved/4_regress/100
+                        time:   [39.513 ns 39.546 ns 39.582 ns]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low severe
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking late_match_interleaved/1_hybrid/1000
+Benchmarking late_match_interleaved/1_hybrid/1000: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/1_hybrid/1000: Collecting 100 samples in estimated 5.0002 s (67M iterations)
+Benchmarking late_match_interleaved/1_hybrid/1000: Analyzing
+late_match_interleaved/1_hybrid/1000
+                        time:   [74.787 ns 75.120 ns 75.758 ns]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking late_match_interleaved/2_pure_rust/1000
+Benchmarking late_match_interleaved/2_pure_rust/1000: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/2_pure_rust/1000: Collecting 100 samples in estimated 5.0460 s (288k iterations)
+Benchmarking late_match_interleaved/2_pure_rust/1000: Analyzing
+late_match_interleaved/2_pure_rust/1000
+                        time:   [17.778 µs 17.800 µs 17.818 µs]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+Benchmarking late_match_interleaved/3_c_engine/1000
+Benchmarking late_match_interleaved/3_c_engine/1000: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/3_c_engine/1000: Collecting 100 samples in estimated 5.5019 s (25k iterations)
+Benchmarking late_match_interleaved/3_c_engine/1000: Analyzing
+late_match_interleaved/3_c_engine/1000
+                        time:   [217.44 µs 217.55 µs 217.68 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) low mild
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking late_match_interleaved/4_regress/1000
+Benchmarking late_match_interleaved/4_regress/1000: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/4_regress/1000: Collecting 100 samples in estimated 5.0002 s (81M iterations)
+Benchmarking late_match_interleaved/4_regress/1000: Analyzing
+late_match_interleaved/4_regress/1000
+                        time:   [62.684 ns 63.099 ns 63.788 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  2 (2.00%) high mild
+  8 (8.00%) high severe
+Benchmarking late_match_interleaved/1_hybrid/10000
+Benchmarking late_match_interleaved/1_hybrid/10000: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/1_hybrid/10000: Collecting 100 samples in estimated 5.0010 s (17M iterations)
+Benchmarking late_match_interleaved/1_hybrid/10000: Analyzing
+late_match_interleaved/1_hybrid/10000
+                        time:   [298.00 ns 298.34 ns 298.83 ns]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking late_match_interleaved/2_pure_rust/10000
+Benchmarking late_match_interleaved/2_pure_rust/10000: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/2_pure_rust/10000: Collecting 100 samples in estimated 5.3917 s (30k iterations)
+Benchmarking late_match_interleaved/2_pure_rust/10000: Analyzing
+late_match_interleaved/2_pure_rust/10000
+                        time:   [177.47 µs 178.60 µs 180.29 µs]
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low severe
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+Benchmarking late_match_interleaved/3_c_engine/10000
+Benchmarking late_match_interleaved/3_c_engine/10000: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/3_c_engine/10000: Collecting 100 samples in estimated 5.0000 s (2300 iterations)
+Benchmarking late_match_interleaved/3_c_engine/10000: Analyzing
+late_match_interleaved/3_c_engine/10000
+                        time:   [2.1783 ms 2.1803 ms 2.1834 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+Benchmarking late_match_interleaved/4_regress/10000
+Benchmarking late_match_interleaved/4_regress/10000: Warming up for 3.0000 s
+Benchmarking late_match_interleaved/4_regress/10000: Collecting 100 samples in estimated 5.0004 s (17M iterations)
+Benchmarking late_match_interleaved/4_regress/10000: Analyzing
+late_match_interleaved/4_regress/10000
+                        time:   [290.07 ns 290.31 ns 290.56 ns]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking no_match_interleaved/1_hybrid/100
+Benchmarking no_match_interleaved/1_hybrid/100: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/1_hybrid/100: Collecting 100 samples in estimated 5.0001 s (98M iterations)
+Benchmarking no_match_interleaved/1_hybrid/100: Analyzing
+no_match_interleaved/1_hybrid/100
+                        time:   [51.023 ns 51.062 ns 51.115 ns]
+Found 13 outliers among 100 measurements (13.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  7 (7.00%) high severe
+Benchmarking no_match_interleaved/2_pure_rust/100
+Benchmarking no_match_interleaved/2_pure_rust/100: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/2_pure_rust/100: Collecting 100 samples in estimated 5.0059 s (2.7M iterations)
+Benchmarking no_match_interleaved/2_pure_rust/100: Analyzing
+no_match_interleaved/2_pure_rust/100
+                        time:   [1.8524 µs 1.8536 µs 1.8552 µs]
+Found 11 outliers among 100 measurements (11.00%)
+  4 (4.00%) high mild
+  7 (7.00%) high severe
+Benchmarking no_match_interleaved/3_c_engine/100
+Benchmarking no_match_interleaved/3_c_engine/100: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/3_c_engine/100: Collecting 100 samples in estimated 5.0185 s (227k iterations)
+Benchmarking no_match_interleaved/3_c_engine/100: Analyzing
+no_match_interleaved/3_c_engine/100
+                        time:   [22.062 µs 22.076 µs 22.089 µs]
+Found 14 outliers among 100 measurements (14.00%)
+  1 (1.00%) low severe
+  8 (8.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking no_match_interleaved/4_regress/100
+Benchmarking no_match_interleaved/4_regress/100: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/4_regress/100: Collecting 100 samples in estimated 5.0001 s (198M iterations)
+Benchmarking no_match_interleaved/4_regress/100: Analyzing
+no_match_interleaved/4_regress/100
+                        time:   [24.892 ns 24.932 ns 24.996 ns]
+Found 9 outliers among 100 measurements (9.00%)
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+Benchmarking no_match_interleaved/1_hybrid/1000
+Benchmarking no_match_interleaved/1_hybrid/1000: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/1_hybrid/1000: Collecting 100 samples in estimated 5.0003 s (69M iterations)
+Benchmarking no_match_interleaved/1_hybrid/1000: Analyzing
+no_match_interleaved/1_hybrid/1000
+                        time:   [72.260 ns 72.308 ns 72.360 ns]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking no_match_interleaved/2_pure_rust/1000
+Benchmarking no_match_interleaved/2_pure_rust/1000: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/2_pure_rust/1000: Collecting 100 samples in estimated 5.0795 s (283k iterations)
+Benchmarking no_match_interleaved/2_pure_rust/1000: Analyzing
+no_match_interleaved/2_pure_rust/1000
+                        time:   [17.827 µs 17.848 µs 17.878 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) high mild
+  5 (5.00%) high severe
+Benchmarking no_match_interleaved/3_c_engine/1000
+Benchmarking no_match_interleaved/3_c_engine/1000: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/3_c_engine/1000: Collecting 100 samples in estimated 5.5522 s (25k iterations)
+Benchmarking no_match_interleaved/3_c_engine/1000: Analyzing
+no_match_interleaved/3_c_engine/1000
+                        time:   [218.47 µs 218.70 µs 219.08 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking no_match_interleaved/4_regress/1000
+Benchmarking no_match_interleaved/4_regress/1000: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/4_regress/1000: Collecting 100 samples in estimated 5.0002 s (97M iterations)
+Benchmarking no_match_interleaved/4_regress/1000: Analyzing
+no_match_interleaved/4_regress/1000
+                        time:   [52.174 ns 52.414 ns 52.808 ns]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking no_match_interleaved/1_hybrid/10000
+Benchmarking no_match_interleaved/1_hybrid/10000: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/1_hybrid/10000: Collecting 100 samples in estimated 5.0002 s (17M iterations)
+Benchmarking no_match_interleaved/1_hybrid/10000: Analyzing
+no_match_interleaved/1_hybrid/10000
+                        time:   [296.58 ns 296.85 ns 297.15 ns]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking no_match_interleaved/2_pure_rust/10000
+Benchmarking no_match_interleaved/2_pure_rust/10000: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/2_pure_rust/10000: Collecting 100 samples in estimated 5.4166 s (30k iterations)
+Benchmarking no_match_interleaved/2_pure_rust/10000: Analyzing
+no_match_interleaved/2_pure_rust/10000
+                        time:   [177.55 µs 177.86 µs 178.42 µs]
+Found 12 outliers among 100 measurements (12.00%)
+  1 (1.00%) high mild
+  11 (11.00%) high severe
+Benchmarking no_match_interleaved/3_c_engine/10000
+Benchmarking no_match_interleaved/3_c_engine/10000: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/3_c_engine/10000: Collecting 100 samples in estimated 5.0026 s (2300 iterations)
+Benchmarking no_match_interleaved/3_c_engine/10000: Analyzing
+no_match_interleaved/3_c_engine/10000
+                        time:   [2.1737 ms 2.1837 ms 2.1972 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking no_match_interleaved/4_regress/10000
+Benchmarking no_match_interleaved/4_regress/10000: Warming up for 3.0000 s
+Benchmarking no_match_interleaved/4_regress/10000: Collecting 100 samples in estimated 5.0009 s (18M iterations)
+Benchmarking no_match_interleaved/4_regress/10000: Analyzing
+no_match_interleaved/4_regress/10000
+                        time:   [276.48 ns 276.64 ns 276.81 ns]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking greedy_interleaved/1_hybrid/10
+Benchmarking greedy_interleaved/1_hybrid/10: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/1_hybrid/10: Collecting 100 samples in estimated 5.0001 s (36M iterations)
+Benchmarking greedy_interleaved/1_hybrid/10: Analyzing
+greedy_interleaved/1_hybrid/10
+                        time:   [139.36 ns 139.56 ns 139.87 ns]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking greedy_interleaved/2_pure_rust/10
+Benchmarking greedy_interleaved/2_pure_rust/10: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/2_pure_rust/10: Collecting 100 samples in estimated 5.0001 s (35M iterations)
+Benchmarking greedy_interleaved/2_pure_rust/10: Analyzing
+greedy_interleaved/2_pure_rust/10
+                        time:   [133.75 ns 135.01 ns 136.39 ns]
+Found 26 outliers among 100 measurements (26.00%)
+  24 (24.00%) low severe
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking greedy_interleaved/3_c_engine/10
+Benchmarking greedy_interleaved/3_c_engine/10: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/3_c_engine/10: Collecting 100 samples in estimated 5.0046 s (2.7M iterations)
+Benchmarking greedy_interleaved/3_c_engine/10: Analyzing
+greedy_interleaved/3_c_engine/10
+                        time:   [1.8581 µs 1.8623 µs 1.8703 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking greedy_interleaved/4_regress/10
+Benchmarking greedy_interleaved/4_regress/10: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/4_regress/10: Collecting 100 samples in estimated 5.0003 s (55M iterations)
+Benchmarking greedy_interleaved/4_regress/10: Analyzing
+greedy_interleaved/4_regress/10
+                        time:   [91.376 ns 91.429 ns 91.482 ns]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking greedy_interleaved/1_hybrid/50
+Benchmarking greedy_interleaved/1_hybrid/50: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/1_hybrid/50: Collecting 100 samples in estimated 5.0023 s (10M iterations)
+Benchmarking greedy_interleaved/1_hybrid/50: Analyzing
+greedy_interleaved/1_hybrid/50
+                        time:   [461.22 ns 464.03 ns 467.64 ns]
+Benchmarking greedy_interleaved/2_pure_rust/50
+Benchmarking greedy_interleaved/2_pure_rust/50: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/2_pure_rust/50: Collecting 100 samples in estimated 5.0020 s (11M iterations)
+Benchmarking greedy_interleaved/2_pure_rust/50: Analyzing
+greedy_interleaved/2_pure_rust/50
+                        time:   [453.78 ns 454.35 ns 455.09 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  7 (7.00%) high mild
+  3 (3.00%) high severe
+Benchmarking greedy_interleaved/3_c_engine/50
+Benchmarking greedy_interleaved/3_c_engine/50: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/3_c_engine/50: Collecting 100 samples in estimated 5.0358 s (596k iterations)
+Benchmarking greedy_interleaved/3_c_engine/50: Analyzing
+greedy_interleaved/3_c_engine/50
+                        time:   [8.4378 µs 8.4426 µs 8.4484 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking greedy_interleaved/4_regress/50
+Benchmarking greedy_interleaved/4_regress/50: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/4_regress/50: Collecting 100 samples in estimated 5.0004 s (52M iterations)
+Benchmarking greedy_interleaved/4_regress/50: Analyzing
+greedy_interleaved/4_regress/50
+                        time:   [98.027 ns 98.337 ns 98.929 ns]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking greedy_interleaved/1_hybrid/100
+Benchmarking greedy_interleaved/1_hybrid/100: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/1_hybrid/100: Collecting 100 samples in estimated 5.0041 s (5.5M iterations)
+Benchmarking greedy_interleaved/1_hybrid/100: Analyzing
+greedy_interleaved/1_hybrid/100
+                        time:   [906.88 ns 907.67 ns 908.90 ns]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking greedy_interleaved/2_pure_rust/100
+Benchmarking greedy_interleaved/2_pure_rust/100: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/2_pure_rust/100: Collecting 100 samples in estimated 5.0036 s (5.7M iterations)
+Benchmarking greedy_interleaved/2_pure_rust/100: Analyzing
+greedy_interleaved/2_pure_rust/100
+                        time:   [875.10 ns 876.28 ns 877.71 ns]
+Found 9 outliers among 100 measurements (9.00%)
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+Benchmarking greedy_interleaved/3_c_engine/100
+Benchmarking greedy_interleaved/3_c_engine/100: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/3_c_engine/100: Collecting 100 samples in estimated 5.0072 s (298k iterations)
+Benchmarking greedy_interleaved/3_c_engine/100: Analyzing
+greedy_interleaved/3_c_engine/100
+                        time:   [16.800 µs 16.808 µs 16.817 µs]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+Benchmarking greedy_interleaved/4_regress/100
+Benchmarking greedy_interleaved/4_regress/100: Warming up for 3.0000 s
+Benchmarking greedy_interleaved/4_regress/100: Collecting 100 samples in estimated 5.0005 s (36M iterations)
+Benchmarking greedy_interleaved/4_regress/100: Analyzing
+greedy_interleaved/4_regress/100
+                        time:   [140.65 ns 140.82 ns 141.06 ns]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking complex_interleaved/1_hybrid/email
+Benchmarking complex_interleaved/1_hybrid/email: Warming up for 3.0000 s
+Benchmarking complex_interleaved/1_hybrid/email: Collecting 100 samples in estimated 5.0015 s (5.7M iterations)
+Benchmarking complex_interleaved/1_hybrid/email: Analyzing
+complex_interleaved/1_hybrid/email
+                        time:   [880.03 ns 881.60 ns 884.49 ns]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking complex_interleaved/2_pure_rust/email
+Benchmarking complex_interleaved/2_pure_rust/email: Warming up for 3.0000 s
+Benchmarking complex_interleaved/2_pure_rust/email: Collecting 100 samples in estimated 5.0021 s (5.7M iterations)
+Benchmarking complex_interleaved/2_pure_rust/email: Analyzing
+complex_interleaved/2_pure_rust/email
+                        time:   [843.75 ns 844.65 ns 845.88 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  2 (2.00%) low severe
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking complex_interleaved/3_c_engine/email
+Benchmarking complex_interleaved/3_c_engine/email: Warming up for 3.0000 s
+Benchmarking complex_interleaved/3_c_engine/email: Collecting 100 samples in estimated 5.0253 s (495k iterations)
+Benchmarking complex_interleaved/3_c_engine/email: Analyzing
+complex_interleaved/3_c_engine/email
+                        time:   [10.120 µs 10.126 µs 10.136 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking complex_interleaved/4_regress/email
+Benchmarking complex_interleaved/4_regress/email: Warming up for 3.0000 s
+Benchmarking complex_interleaved/4_regress/email: Collecting 100 samples in estimated 5.0008 s (14M iterations)
+Benchmarking complex_interleaved/4_regress/email: Analyzing
+complex_interleaved/4_regress/email
+                        time:   [357.58 ns 358.14 ns 358.73 ns]
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+Benchmarking complex_interleaved/1_hybrid/url
+Benchmarking complex_interleaved/1_hybrid/url: Warming up for 3.0000 s
+Benchmarking complex_interleaved/1_hybrid/url: Collecting 100 samples in estimated 5.0006 s (14M iterations)
+Benchmarking complex_interleaved/1_hybrid/url: Analyzing
+complex_interleaved/1_hybrid/url
+                        time:   [351.06 ns 351.95 ns 353.52 ns]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking complex_interleaved/2_pure_rust/url
+Benchmarking complex_interleaved/2_pure_rust/url: Warming up for 3.0000 s
+Benchmarking complex_interleaved/2_pure_rust/url: Collecting 100 samples in estimated 5.0020 s (12M iterations)
+Benchmarking complex_interleaved/2_pure_rust/url: Analyzing
+complex_interleaved/2_pure_rust/url
+                        time:   [406.53 ns 406.87 ns 407.25 ns]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low mild
+  6 (6.00%) high mild
+  1 (1.00%) high severe
+Benchmarking complex_interleaved/3_c_engine/url
+Benchmarking complex_interleaved/3_c_engine/url: Warming up for 3.0000 s
+Benchmarking complex_interleaved/3_c_engine/url: Collecting 100 samples in estimated 5.0054 s (1.1M iterations)
+Benchmarking complex_interleaved/3_c_engine/url: Analyzing
+complex_interleaved/3_c_engine/url
+                        time:   [4.4859 µs 4.4872 µs 4.4885 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking complex_interleaved/4_regress/url
+Benchmarking complex_interleaved/4_regress/url: Warming up for 3.0000 s
+Benchmarking complex_interleaved/4_regress/url: Collecting 100 samples in estimated 5.0002 s (45M iterations)
+Benchmarking complex_interleaved/4_regress/url: Analyzing
+complex_interleaved/4_regress/url
+                        time:   [111.51 ns 111.58 ns 111.64 ns]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking complex_interleaved/1_hybrid/word_boundary
+Benchmarking complex_interleaved/1_hybrid/word_boundary: Warming up for 3.0000 s
+Benchmarking complex_interleaved/1_hybrid/word_boundary: Collecting 100 samples in estimated 5.0002 s (19M iterations)
+Benchmarking complex_interleaved/1_hybrid/word_boundary: Analyzing
+complex_interleaved/1_hybrid/word_boundary
+                        time:   [270.05 ns 270.24 ns 270.47 ns]
+Found 12 outliers among 100 measurements (12.00%)
+  2 (2.00%) low severe
+  3 (3.00%) low mild
+  7 (7.00%) high severe
+Benchmarking complex_interleaved/2_pure_rust/word_boundary
+Benchmarking complex_interleaved/2_pure_rust/word_boundary: Warming up for 3.0000 s
+Benchmarking complex_interleaved/2_pure_rust/word_boundary: Collecting 100 samples in estimated 5.0008 s (18M iterations)
+Benchmarking complex_interleaved/2_pure_rust/word_boundary: Analyzing
+complex_interleaved/2_pure_rust/word_boundary
+                        time:   [269.40 ns 269.66 ns 270.05 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking complex_interleaved/3_c_engine/word_boundary
+Benchmarking complex_interleaved/3_c_engine/word_boundary: Warming up for 3.0000 s
+Benchmarking complex_interleaved/3_c_engine/word_boundary: Collecting 100 samples in estimated 5.0024 s (2.2M iterations)
+Benchmarking complex_interleaved/3_c_engine/word_boundary: Analyzing
+complex_interleaved/3_c_engine/word_boundary
+                        time:   [2.2246 µs 2.2260 µs 2.2278 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking complex_interleaved/4_regress/word_boundary
+Benchmarking complex_interleaved/4_regress/word_boundary: Warming up for 3.0000 s
+Benchmarking complex_interleaved/4_regress/word_boundary: Collecting 100 samples in estimated 5.0004 s (46M iterations)
+Benchmarking complex_interleaved/4_regress/word_boundary: Analyzing
+complex_interleaved/4_regress/word_boundary
+                        time:   [108.18 ns 108.27 ns 108.37 ns]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking complex_interleaved/1_hybrid/lookahead
+Benchmarking complex_interleaved/1_hybrid/lookahead: Warming up for 3.0000 s
+Benchmarking complex_interleaved/1_hybrid/lookahead: Collecting 100 samples in estimated 5.0001 s (55M iterations)
+Benchmarking complex_interleaved/1_hybrid/lookahead: Analyzing
+complex_interleaved/1_hybrid/lookahead
+                        time:   [91.281 ns 91.368 ns 91.453 ns]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking complex_interleaved/2_pure_rust/lookahead
+Benchmarking complex_interleaved/2_pure_rust/lookahead: Warming up for 3.0000 s
+Benchmarking complex_interleaved/2_pure_rust/lookahead: Collecting 100 samples in estimated 5.0002 s (55M iterations)
+Benchmarking complex_interleaved/2_pure_rust/lookahead: Analyzing
+complex_interleaved/2_pure_rust/lookahead
+                        time:   [90.694 ns 90.742 ns 90.789 ns]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) low severe
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking complex_interleaved/3_c_engine/lookahead
+Benchmarking complex_interleaved/3_c_engine/lookahead: Warming up for 3.0000 s
+Benchmarking complex_interleaved/3_c_engine/lookahead: Collecting 100 samples in estimated 5.0019 s (12M iterations)
+Benchmarking complex_interleaved/3_c_engine/lookahead: Analyzing
+complex_interleaved/3_c_engine/lookahead
+                        time:   [399.76 ns 399.89 ns 400.03 ns]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking complex_interleaved/4_regress/lookahead
+Benchmarking complex_interleaved/4_regress/lookahead: Warming up for 3.0000 s
+Benchmarking complex_interleaved/4_regress/lookahead: Collecting 100 samples in estimated 5.0001 s (90M iterations)
+Benchmarking complex_interleaved/4_regress/lookahead: Analyzing
+complex_interleaved/4_regress/lookahead
+                        time:   [55.017 ns 55.044 ns 55.073 ns]
+Found 9 outliers among 100 measurements (9.00%)
+  1 (1.00%) low mild
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking backtracking_interleaved/1_hybrid/bt_5
+Benchmarking backtracking_interleaved/1_hybrid/bt_5: Warming up for 3.0000 s
+Benchmarking backtracking_interleaved/1_hybrid/bt_5: Collecting 100 samples in estimated 5.0021 s (6.3M iterations)
+Benchmarking backtracking_interleaved/1_hybrid/bt_5: Analyzing
+backtracking_interleaved/1_hybrid/bt_5
+                        time:   [808.41 ns 815.92 ns 823.93 ns]
+Found 25 outliers among 100 measurements (25.00%)
+  13 (13.00%) low severe
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+Benchmarking backtracking_interleaved/2_pure_rust/bt_5
+Benchmarking backtracking_interleaved/2_pure_rust/bt_5: Warming up for 3.0000 s
+Benchmarking backtracking_interleaved/2_pure_rust/bt_5: Collecting 100 samples in estimated 5.0013 s (6.1M iterations)
+Benchmarking backtracking_interleaved/2_pure_rust/bt_5: Analyzing
+backtracking_interleaved/2_pure_rust/bt_5
+                        time:   [830.96 ns 831.23 ns 831.53 ns]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking backtracking_interleaved/3_c_engine/bt_5
+Benchmarking backtracking_interleaved/3_c_engine/bt_5: Warming up for 3.0000 s
+Benchmarking backtracking_interleaved/3_c_engine/bt_5: Collecting 100 samples in estimated 5.0236 s (662k iterations)
+Benchmarking backtracking_interleaved/3_c_engine/bt_5: Analyzing
+backtracking_interleaved/3_c_engine/bt_5
+                        time:   [7.5873 µs 7.5895 µs 7.5917 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking backtracking_interleaved/4_regress/bt_5
+Benchmarking backtracking_interleaved/4_regress/bt_5: Warming up for 3.0000 s
+Benchmarking backtracking_interleaved/4_regress/bt_5: Collecting 100 samples in estimated 5.0020 s (10M iterations)
+Benchmarking backtracking_interleaved/4_regress/bt_5: Analyzing
+backtracking_interleaved/4_regress/bt_5
+                        time:   [493.61 ns 494.00 ns 494.40 ns]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+Benchmarking backtracking_interleaved/1_hybrid/bt_10
+Benchmarking backtracking_interleaved/1_hybrid/bt_10: Warming up for 3.0000 s
+Benchmarking backtracking_interleaved/1_hybrid/bt_10: Collecting 100 samples in estimated 5.1174 s (141k iterations)
+Benchmarking backtracking_interleaved/1_hybrid/bt_10: Analyzing
+backtracking_interleaved/1_hybrid/bt_10
+                        time:   [37.707 µs 38.006 µs 38.417 µs]
+Found 31 outliers among 100 measurements (31.00%)
+  20 (20.00%) low severe
+  1 (1.00%) low mild
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking backtracking_interleaved/2_pure_rust/bt_10
+Benchmarking backtracking_interleaved/2_pure_rust/bt_10: Warming up for 3.0000 s
+Benchmarking backtracking_interleaved/2_pure_rust/bt_10: Collecting 100 samples in estimated 5.0270 s (146k iterations)
+Benchmarking backtracking_interleaved/2_pure_rust/bt_10: Analyzing
+backtracking_interleaved/2_pure_rust/bt_10
+                        time:   [35.484 µs 35.549 µs 35.638 µs]
+Found 22 outliers among 100 measurements (22.00%)
+  11 (11.00%) low severe
+  1 (1.00%) high mild
+  10 (10.00%) high severe
+Benchmarking backtracking_interleaved/3_c_engine/bt_10
+Benchmarking backtracking_interleaved/3_c_engine/bt_10: Warming up for 3.0000 s
+Benchmarking backtracking_interleaved/3_c_engine/bt_10: Collecting 100 samples in estimated 5.1962 s (20k iterations)
+Benchmarking backtracking_interleaved/3_c_engine/bt_10: Analyzing
+backtracking_interleaved/3_c_engine/bt_10
+                        time:   [256.22 µs 256.31 µs 256.41 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+Benchmarking backtracking_interleaved/4_regress/bt_10
+Benchmarking backtracking_interleaved/4_regress/bt_10: Warming up for 3.0000 s
+Benchmarking backtracking_interleaved/4_regress/bt_10: Collecting 100 samples in estimated 5.0021 s (399k iterations)
+Benchmarking backtracking_interleaved/4_regress/bt_10: Analyzing
+backtracking_interleaved/4_regress/bt_10
+                        time:   [12.876 µs 12.884 µs 12.894 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking realistic_interleaved/1_hybrid/log_parse
+Benchmarking realistic_interleaved/1_hybrid/log_parse: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/1_hybrid/log_parse: Collecting 100 samples in estimated 5.0015 s (12M iterations)
+Benchmarking realistic_interleaved/1_hybrid/log_parse: Analyzing
+realistic_interleaved/1_hybrid/log_parse
+                        time:   [403.31 ns 403.52 ns 403.74 ns]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking realistic_interleaved/2_pure_rust/log_parse
+Benchmarking realistic_interleaved/2_pure_rust/log_parse: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/2_pure_rust/log_parse: Collecting 100 samples in estimated 5.0001 s (13M iterations)
+Benchmarking realistic_interleaved/2_pure_rust/log_parse: Analyzing
+realistic_interleaved/2_pure_rust/log_parse
+                        time:   [400.16 ns 401.40 ns 402.73 ns]
+Found 22 outliers among 100 measurements (22.00%)
+  12 (12.00%) low severe
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking realistic_interleaved/3_c_engine/log_parse
+Benchmarking realistic_interleaved/3_c_engine/log_parse: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/3_c_engine/log_parse: Collecting 100 samples in estimated 5.0053 s (2.9M iterations)
+Benchmarking realistic_interleaved/3_c_engine/log_parse: Analyzing
+realistic_interleaved/3_c_engine/log_parse
+                        time:   [1.7098 µs 1.7212 µs 1.7373 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+Benchmarking realistic_interleaved/4_regress/log_parse
+Benchmarking realistic_interleaved/4_regress/log_parse: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/4_regress/log_parse: Collecting 100 samples in estimated 5.0009 s (20M iterations)
+Benchmarking realistic_interleaved/4_regress/log_parse: Analyzing
+realistic_interleaved/4_regress/log_parse
+                        time:   [249.48 ns 249.70 ns 250.02 ns]
+Found 9 outliers among 100 measurements (9.00%)
+  6 (6.00%) high mild
+  3 (3.00%) high severe
+Benchmarking realistic_interleaved/1_hybrid/json_key
+Benchmarking realistic_interleaved/1_hybrid/json_key: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/1_hybrid/json_key: Collecting 100 samples in estimated 5.0007 s (21M iterations)
+Benchmarking realistic_interleaved/1_hybrid/json_key: Analyzing
+realistic_interleaved/1_hybrid/json_key
+                        time:   [238.39 ns 238.68 ns 239.09 ns]
+Found 13 outliers among 100 measurements (13.00%)
+  5 (5.00%) high mild
+  8 (8.00%) high severe
+Benchmarking realistic_interleaved/2_pure_rust/json_key
+Benchmarking realistic_interleaved/2_pure_rust/json_key: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/2_pure_rust/json_key: Collecting 100 samples in estimated 5.0011 s (21M iterations)
+Benchmarking realistic_interleaved/2_pure_rust/json_key: Analyzing
+realistic_interleaved/2_pure_rust/json_key
+                        time:   [239.79 ns 240.00 ns 240.31 ns]
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+Benchmarking realistic_interleaved/3_c_engine/json_key
+Benchmarking realistic_interleaved/3_c_engine/json_key: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/3_c_engine/json_key: Collecting 100 samples in estimated 5.0021 s (1.8M iterations)
+Benchmarking realistic_interleaved/3_c_engine/json_key: Analyzing
+realistic_interleaved/3_c_engine/json_key
+                        time:   [2.7257 µs 2.7282 µs 2.7303 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking realistic_interleaved/4_regress/json_key
+Benchmarking realistic_interleaved/4_regress/json_key: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/4_regress/json_key: Collecting 100 samples in estimated 5.0001 s (26M iterations)
+Benchmarking realistic_interleaved/4_regress/json_key: Analyzing
+realistic_interleaved/4_regress/json_key
+                        time:   [195.60 ns 195.71 ns 195.85 ns]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking realistic_interleaved/1_hybrid/ip_address
+Benchmarking realistic_interleaved/1_hybrid/ip_address: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/1_hybrid/ip_address: Collecting 100 samples in estimated 5.0002 s (24M iterations)
+Benchmarking realistic_interleaved/1_hybrid/ip_address: Analyzing
+realistic_interleaved/1_hybrid/ip_address
+                        time:   [208.14 ns 208.39 ns 208.75 ns]
+Found 16 outliers among 100 measurements (16.00%)
+  5 (5.00%) low severe
+  6 (6.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking realistic_interleaved/2_pure_rust/ip_address
+Benchmarking realistic_interleaved/2_pure_rust/ip_address: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/2_pure_rust/ip_address: Collecting 100 samples in estimated 5.0024 s (10M iterations)
+Benchmarking realistic_interleaved/2_pure_rust/ip_address: Analyzing
+realistic_interleaved/2_pure_rust/ip_address
+                        time:   [497.35 ns 497.96 ns 498.53 ns]
+Found 12 outliers among 100 measurements (12.00%)
+  5 (5.00%) low severe
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking realistic_interleaved/3_c_engine/ip_address
+Benchmarking realistic_interleaved/3_c_engine/ip_address: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/3_c_engine/ip_address: Collecting 100 samples in estimated 5.0182 s (1.1M iterations)
+Benchmarking realistic_interleaved/3_c_engine/ip_address: Analyzing
+realistic_interleaved/3_c_engine/ip_address
+                        time:   [4.4378 µs 4.4397 µs 4.4417 µs]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high severe
+Benchmarking realistic_interleaved/4_regress/ip_address
+Benchmarking realistic_interleaved/4_regress/ip_address: Warming up for 3.0000 s
+Benchmarking realistic_interleaved/4_regress/ip_address: Collecting 100 samples in estimated 5.0001 s (39M iterations)
+Benchmarking realistic_interleaved/4_regress/ip_address: Analyzing
+realistic_interleaved/4_regress/ip_address
+                        time:   [126.39 ns 126.53 ns 126.68 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) low mild
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+

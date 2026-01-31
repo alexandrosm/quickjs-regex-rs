@@ -348,6 +348,7 @@ dependencies = [
 name = "quickjs-regex"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "c2rust-bitfields",
  "criterion",
  "libc",

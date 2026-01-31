@@ -34,6 +34,7 @@ pub use error::{Error, Result, ExecResult};
 use std::ffi::CStr;
 use std::ptr;
 
+use aho_corasick::AhoCorasick;
 use memchr::{memchr, memchr2, memchr3, memmem};
 
 // Threshold for using optimizations (bytes)
@@ -136,7 +137,7 @@ impl ByteBitmap {
 // ============================================================================
 
 /// Optimized search strategy extracted from pattern analysis
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum SearchStrategy {
     /// Pattern is anchored to start - only try position 0
     Anchored,
@@ -152,6 +153,13 @@ enum SearchStrategy {
     ThreeBytes(u8, u8, u8),
     /// Multi-byte literal prefix
     LiteralPrefix(Vec<u8>),
+    /// Alternation of pure literals - use Aho-Corasick!
+    AlternationLiterals {
+        literals: Vec<Vec<u8>>,
+        ac: AhoCorasick,
+    },
+    /// Pattern ends with a literal suffix - search backwards
+    SuffixLiteral(Vec<u8>),
     /// Bitmap-based search for character classes with 4+ bytes
     Bitmap(ByteBitmap),
     /// Search for digit (0-9)
@@ -162,6 +170,30 @@ enum SearchStrategy {
     Whitespace,
     /// No optimization available - scan every position
     None,
+}
+
+impl std::fmt::Debug for SearchStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SearchStrategy::Anchored => write!(f, "Anchored"),
+            SearchStrategy::AnchoredLiteral(lit) => write!(f, "AnchoredLiteral({:?})", String::from_utf8_lossy(lit)),
+            SearchStrategy::PureLiteral(lit) => write!(f, "PureLiteral({:?})", String::from_utf8_lossy(lit)),
+            SearchStrategy::SingleByte(b) => write!(f, "SingleByte({:?})", *b as char),
+            SearchStrategy::TwoBytes(b1, b2) => write!(f, "TwoBytes({:?}, {:?})", *b1 as char, *b2 as char),
+            SearchStrategy::ThreeBytes(b1, b2, b3) => write!(f, "ThreeBytes({:?}, {:?}, {:?})", *b1 as char, *b2 as char, *b3 as char),
+            SearchStrategy::LiteralPrefix(lit) => write!(f, "LiteralPrefix({:?})", String::from_utf8_lossy(lit)),
+            SearchStrategy::AlternationLiterals { literals, .. } => {
+                let strs: Vec<_> = literals.iter().map(|l| String::from_utf8_lossy(l).to_string()).collect();
+                write!(f, "AlternationLiterals({:?})", strs)
+            }
+            SearchStrategy::SuffixLiteral(lit) => write!(f, "SuffixLiteral({:?})", String::from_utf8_lossy(lit)),
+            SearchStrategy::Bitmap(bm) => write!(f, "{:?}", bm),
+            SearchStrategy::Digit => write!(f, "Digit"),
+            SearchStrategy::WordChar => write!(f, "WordChar"),
+            SearchStrategy::Whitespace => write!(f, "Whitespace"),
+            SearchStrategy::None => write!(f, "None"),
+        }
+    }
 }
 
 // ============================================================================
@@ -284,6 +316,14 @@ impl Regex {
 
             SearchStrategy::Bitmap(bitmap) => {
                 self.find_with_bitmap(text, bitmap)
+            }
+
+            SearchStrategy::AlternationLiterals { literals, ac } => {
+                self.find_with_alternation_literals(text, literals, ac)
+            }
+
+            SearchStrategy::SuffixLiteral(suffix) => {
+                self.find_with_suffix_literal(text, suffix)
             }
 
             SearchStrategy::Digit => {
@@ -486,6 +526,54 @@ impl Regex {
         None
     }
 
+    /// Find alternation of pure literals using Aho-Corasick - BLAZING FAST!
+    #[inline]
+    fn find_with_alternation_literals(&self, text: &str, literals: &[Vec<u8>], ac: &AhoCorasick) -> Option<Match> {
+        let bytes = text.as_bytes();
+        // Aho-Corasick finds the earliest match across all patterns
+        ac.find(bytes).map(|mat| {
+            Match {
+                start: mat.start(),
+                end: mat.end(),
+            }
+        })
+    }
+
+    /// Find pattern with suffix literal by scanning backwards
+    #[inline]
+    fn find_with_suffix_literal(&self, text: &str, suffix: &[u8]) -> Option<Match> {
+        let bytes = text.as_bytes();
+        let finder = memmem::Finder::new(suffix);
+
+        // Find all occurrences of the suffix and try to match from before each
+        for pos in finder.find_iter(bytes) {
+            // The pattern must end at pos + suffix.len()
+            // Try matching from various positions before the suffix
+            // For patterns like [a-z]+ing, we need to find where the match starts
+
+            // Try matching at position 0 first if suffix is at start
+            if pos == 0 {
+                if let Some(m) = self.try_match_at(text, 0) {
+                    return Some(m);
+                }
+            } else {
+                // Try positions going back from the suffix
+                // Limit how far back we look to avoid quadratic behavior
+                let look_back = pos.min(64);
+                for back in 0..=look_back {
+                    let try_pos = pos - back;
+                    if let Some(m) = self.try_match_at(text, try_pos) {
+                        // Verify the match actually covers this suffix
+                        if m.end >= pos + suffix.len() {
+                            return Some(m);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Find a match starting at or after the given byte offset.
     /// Uses memchr scanning based on SearchStrategy for fast candidate position finding.
     /// This is the key optimization that makes pure-rust competitive with hybrid.
@@ -546,6 +634,14 @@ impl Regex {
 
             SearchStrategy::Bitmap(bitmap) => {
                 self.find_at_bitmap(text, start, bitmap)
+            }
+
+            SearchStrategy::AlternationLiterals { literals, ac } => {
+                self.find_at_alternation_literals(text, start, literals, ac)
+            }
+
+            SearchStrategy::SuffixLiteral(suffix) => {
+                self.find_at_suffix_literal(text, start, suffix)
             }
 
             SearchStrategy::Digit => {
@@ -725,6 +821,41 @@ impl Regex {
         None
     }
 
+    /// Find alternation of literals using Aho-Corasick from a starting position
+    #[inline]
+    fn find_at_alternation_literals(&self, text: &str, start: usize, literals: &[Vec<u8>], ac: &AhoCorasick) -> Option<Match> {
+        let bytes = &text.as_bytes()[start..];
+        ac.find(bytes).map(|mat| {
+            Match {
+                start: start + mat.start(),
+                end: start + mat.end(),
+            }
+        })
+    }
+
+    /// Find suffix literal from a starting position
+    #[inline]
+    fn find_at_suffix_literal(&self, text: &str, start: usize, suffix: &[u8]) -> Option<Match> {
+        let bytes = &text.as_bytes()[start..];
+        let finder = memmem::Finder::new(suffix);
+
+        for pos in finder.find_iter(bytes) {
+            let abs_suffix_pos = start + pos;
+
+            // Try matching from positions before the suffix
+            let look_back = pos.min(64);
+            for back in 0..=look_back {
+                let try_pos = start + pos - back;
+                if let Some(m) = self.try_match_at(text, try_pos) {
+                    if m.end >= abs_suffix_pos + suffix.len() {
+                        return Some(m);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Fallback: Linear scan trying every position from start
     #[inline]
     fn find_at_linear(&self, text: &str, start: usize) -> Option<Match> {
@@ -831,11 +962,19 @@ impl Regex {
     /// assert_eq!(matches.len(), 3);
     /// ```
     pub fn find_iter<'r, 't>(&'r self, text: &'t str) -> MatchIterator<'r, 't> {
-        // Use specialized iterator for pure literals (much faster!)
+        // Use specialized iterator for patterns we can handle super fast
         match &self.strategy {
             SearchStrategy::PureLiteral(literal) => {
                 MatchIterator::Literal(LiteralMatches {
                     literal: literal.as_slice(),
+                    text,
+                    pos: 0,
+                })
+            }
+            SearchStrategy::AlternationLiterals { literals, ac } => {
+                MatchIterator::Alternation(AlternationMatches {
+                    ac,
+                    literals,
                     text,
                     pos: 0,
                 })
@@ -1031,6 +1170,7 @@ impl Captures {
 /// Match iterator enum - dispatches between literal and general matching
 pub enum MatchIterator<'r, 't> {
     Literal(LiteralMatches<'r, 't>),
+    Alternation(AlternationMatches<'r, 't>),
     General(Matches<'r, 't>),
 }
 
@@ -1040,6 +1180,7 @@ impl<'r, 't> Iterator for MatchIterator<'r, 't> {
     fn next(&mut self) -> Option<Match> {
         match self {
             MatchIterator::Literal(lit) => lit.next(),
+            MatchIterator::Alternation(alt) => alt.next(),
             MatchIterator::General(gen) => gen.next(),
         }
     }
@@ -1068,6 +1209,35 @@ impl<'r, 't> Iterator for LiteralMatches<'r, 't> {
             Some(Match { start, end })
         } else {
             self.pos = self.text.len(); // No more matches
+            None
+        }
+    }
+}
+
+/// Fast iterator for alternation of literals using Aho-Corasick
+pub struct AlternationMatches<'r, 't> {
+    ac: &'r AhoCorasick,
+    literals: &'r [Vec<u8>],
+    text: &'t str,
+    pos: usize,
+}
+
+impl<'r, 't> Iterator for AlternationMatches<'r, 't> {
+    type Item = Match;
+
+    fn next(&mut self) -> Option<Match> {
+        if self.pos >= self.text.len() {
+            return None;
+        }
+
+        let bytes = &self.text.as_bytes()[self.pos..];
+        if let Some(mat) = self.ac.find(bytes) {
+            let start = self.pos + mat.start();
+            let end = self.pos + mat.end();
+            self.pos = end; // Non-overlapping
+            Some(Match { start, end })
+        } else {
+            self.pos = self.text.len();
             None
         }
     }
@@ -1421,8 +1591,35 @@ fn analyze_char_class(chars: &mut std::iter::Peekable<std::str::Chars>, _case_in
     }
 }
 
-/// Analyze alternation like foo|bar|baz to extract first bytes
+/// Analyze alternation like foo|bar|baz
+/// Returns AlternationLiterals if all alternatives are pure literals (uses Aho-Corasick!)
+/// Otherwise extracts first bytes for memchr optimization
 fn analyze_alternation(pattern: &str, case_insensitive: bool) -> SearchStrategy {
+    // First, try to extract all alternatives as pure literals
+    let alternatives: Vec<&str> = split_top_level_alternation(pattern);
+
+    if !case_insensitive && alternatives.len() >= 2 {
+        // Check if all alternatives are pure literals
+        let mut all_pure = true;
+        let mut literals: Vec<Vec<u8>> = Vec::new();
+
+        for alt in &alternatives {
+            if let Some(lit) = extract_pure_literal(alt) {
+                literals.push(lit);
+            } else {
+                all_pure = false;
+                break;
+            }
+        }
+
+        if all_pure && !literals.is_empty() {
+            // Use Aho-Corasick for multi-pattern matching - BLAZING FAST!
+            let ac = AhoCorasick::new(&literals).unwrap();
+            return SearchStrategy::AlternationLiterals { literals, ac };
+        }
+    }
+
+    // Fall back to extracting first bytes
     let mut first_bytes = Vec::new();
     let mut depth = 0;
     let mut chars = pattern.chars().peekable();
@@ -1487,6 +1684,85 @@ fn analyze_alternation(pattern: &str, case_insensitive: bool) -> SearchStrategy 
         2 => SearchStrategy::TwoBytes(first_bytes[0], first_bytes[1]),
         3 => SearchStrategy::ThreeBytes(first_bytes[0], first_bytes[1], first_bytes[2]),
         _ => SearchStrategy::None,
+    }
+}
+
+/// Split a pattern on top-level '|' (not inside groups)
+fn split_top_level_alternation(pattern: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+
+    for (i, c) in pattern.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => { if depth > 0 { depth -= 1; } }
+            '|' if depth == 0 => {
+                result.push(&pattern[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    result.push(&pattern[start..]);
+    result
+}
+
+/// Extract a pure literal from a simple pattern (no metacharacters)
+fn extract_pure_literal(pattern: &str) -> Option<Vec<u8>> {
+    let mut literal = Vec::new();
+    let mut chars = pattern.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            // Metacharacters - not a pure literal
+            '.' | '*' | '+' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '$' | '^' | '|' => {
+                return None;
+            }
+            '\\' => {
+                // Handle escape sequences
+                match chars.next() {
+                    Some('\\') => literal.push(b'\\'),
+                    Some('n') => literal.push(b'\n'),
+                    Some('r') => literal.push(b'\r'),
+                    Some('t') => literal.push(b'\t'),
+                    Some('.') => literal.push(b'.'),
+                    Some('*') => literal.push(b'*'),
+                    Some('+') => literal.push(b'+'),
+                    Some('?') => literal.push(b'?'),
+                    Some('[') => literal.push(b'['),
+                    Some(']') => literal.push(b']'),
+                    Some('(') => literal.push(b'('),
+                    Some(')') => literal.push(b')'),
+                    Some('{') => literal.push(b'{'),
+                    Some('}') => literal.push(b'}'),
+                    Some('|') => literal.push(b'|'),
+                    Some('^') => literal.push(b'^'),
+                    Some('$') => literal.push(b'$'),
+                    Some('/') => literal.push(b'/'),
+                    // Character classes are not literals
+                    Some('d') | Some('D') | Some('w') | Some('W') | Some('s') | Some('S') | Some('b') | Some('B') => {
+                        return None;
+                    }
+                    _ => return None,
+                }
+            }
+            _ if c.is_ascii() => {
+                literal.push(c as u8);
+            }
+            _ => {
+                // Non-ASCII - encode as UTF-8
+                let mut buf = [0u8; 4];
+                let encoded = c.encode_utf8(&mut buf);
+                literal.extend_from_slice(encoded.as_bytes());
+            }
+        }
+    }
+
+    if literal.is_empty() {
+        None
+    } else {
+        Some(literal)
     }
 }
 
@@ -1915,8 +2191,20 @@ mod tests {
 
     #[test]
     fn test_strategy_alternation() {
+        // Pure literal alternation now uses Aho-Corasick
         let strategy = analyze_pattern("cat|dog", Flags::empty());
-        assert!(matches!(strategy, SearchStrategy::TwoBytes(b'c', b'd')));
+        match strategy {
+            SearchStrategy::AlternationLiterals { literals, .. } => {
+                assert_eq!(literals.len(), 2);
+                assert_eq!(literals[0], b"cat");
+                assert_eq!(literals[1], b"dog");
+            }
+            _ => panic!("Expected AlternationLiterals, got {:?}", strategy),
+        }
+
+        // Case-insensitive falls back to TwoBytes
+        let strategy = analyze_pattern("cat|dog", Flags::from_bits(Flags::IGNORE_CASE));
+        assert!(matches!(strategy, SearchStrategy::TwoBytes(_, _)));
     }
 
     // ========================================================================

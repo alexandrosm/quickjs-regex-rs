@@ -12,6 +12,7 @@ categories = ["text-processing"]
 c2rust-bitfields = "0.21"
 libc = "0.2"
 memchr = "2"
+aho-corasick = "1"
 
 [dev-dependencies]
 criterion = "0.5"
