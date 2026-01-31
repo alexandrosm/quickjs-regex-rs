@@ -1059,6 +1059,16 @@ impl Regex {
                     pos: 0,
                 })
             }
+            // Pure fast-path iterators
+            SearchStrategy::PureDigitPlus => {
+                MatchIterator::PureDigit(PureDigitMatches { text, pos: 0 })
+            }
+            SearchStrategy::PureWordPlus => {
+                MatchIterator::PureWord(PureWordMatches { text, pos: 0 })
+            }
+            SearchStrategy::QuotedString(quote) => {
+                MatchIterator::QuotedStr(QuotedStringMatches { text, pos: 0, quote: *quote })
+            }
             _ => {
                 MatchIterator::General(Matches {
                     regex: self,
@@ -1251,6 +1261,9 @@ impl Captures {
 pub enum MatchIterator<'r, 't> {
     Literal(LiteralMatches<'r, 't>),
     Alternation(AlternationMatches<'r, 't>),
+    PureDigit(PureDigitMatches<'t>),
+    PureWord(PureWordMatches<'t>),
+    QuotedStr(QuotedStringMatches<'t>),
     General(Matches<'r, 't>),
 }
 
@@ -1261,6 +1274,9 @@ impl<'r, 't> Iterator for MatchIterator<'r, 't> {
         match self {
             MatchIterator::Literal(lit) => lit.next(),
             MatchIterator::Alternation(alt) => alt.next(),
+            MatchIterator::PureDigit(d) => d.next(),
+            MatchIterator::PureWord(w) => w.next(),
+            MatchIterator::QuotedStr(q) => q.next(),
             MatchIterator::General(gen) => gen.next(),
         }
     }
@@ -1320,6 +1336,58 @@ impl<'r, 't> Iterator for AlternationMatches<'r, 't> {
             self.pos = self.text.len();
             None
         }
+    }
+}
+
+/// Fast iterator for pure digit patterns [0-9]+ - NO INTERPRETER!
+pub struct PureDigitMatches<'t> {
+    text: &'t str,
+    pos: usize,
+}
+
+impl<'t> Iterator for PureDigitMatches<'t> {
+    type Item = Match;
+
+    fn next(&mut self) -> Option<Match> {
+        let bytes = self.text.as_bytes();
+        let m = find_digit_run(bytes, self.pos)?;
+        self.pos = m.end;
+        Some(m)
+    }
+}
+
+/// Fast iterator for pure word char patterns \w+ - NO INTERPRETER!
+pub struct PureWordMatches<'t> {
+    text: &'t str,
+    pos: usize,
+}
+
+impl<'t> Iterator for PureWordMatches<'t> {
+    type Item = Match;
+
+    fn next(&mut self) -> Option<Match> {
+        let bytes = self.text.as_bytes();
+        let m = find_word_run(bytes, self.pos)?;
+        self.pos = m.end;
+        Some(m)
+    }
+}
+
+/// Fast iterator for quoted string patterns "[^"]*" - NO INTERPRETER!
+pub struct QuotedStringMatches<'t> {
+    text: &'t str,
+    pos: usize,
+    quote: u8,
+}
+
+impl<'t> Iterator for QuotedStringMatches<'t> {
+    type Item = Match;
+
+    fn next(&mut self) -> Option<Match> {
+        let bytes = self.text.as_bytes();
+        let m = find_quoted_string(bytes, self.pos, self.quote)?;
+        self.pos = m.end;
+        Some(m)
     }
 }
 
