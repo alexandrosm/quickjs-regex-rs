@@ -2164,31 +2164,10 @@ static WHITESPACE_BITMAP: ByteBitmap = {
     ByteBitmap { bits }
 };
 
-/// Find the first digit (0-9) in a byte slice
-/// Uses memchr for SIMD acceleration on common digits
+/// Find the first digit (0-9) in a byte slice using SIMD
 #[inline]
 fn find_digit(bytes: &[u8]) -> Option<usize> {
-    // memchr is SIMD-accelerated and much faster than bitmap checking
-    // Search for common digits first
-    let mut pos = 0;
-    while pos < bytes.len() {
-        // Find any of 0-4 (covers most cases)
-        if let Some(found) = memchr3(b'0', b'1', b'2', &bytes[pos..]) {
-            return Some(pos + found);
-        }
-        // Also check 3-9 with another memchr3 pass
-        if let Some(found) = memchr3(b'3', b'4', b'5', &bytes[pos..]) {
-            return Some(pos + found);
-        }
-        if let Some(found) = memchr3(b'6', b'7', b'8', &bytes[pos..]) {
-            return Some(pos + found);
-        }
-        if let Some(found) = memchr(b'9', &bytes[pos..]) {
-            return Some(pos + found);
-        }
-        break;
-    }
-    None
+    find_first_digit(bytes, 0)
 }
 
 /// Find the first word character (a-z, A-Z, 0-9, _) in a byte slice
