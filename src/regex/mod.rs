@@ -2504,41 +2504,52 @@ fn find_capital_word(bytes: &[u8], start: usize) -> Option<Match> {
 #[inline]
 fn find_lower_suffix(bytes: &[u8], start: usize, suffix: &[u8]) -> Option<Match> {
     let suffix_len = suffix.len();
+    if suffix_len == 0 || start >= bytes.len() {
+        return None;
+    }
+
+    // Use SIMD-accelerated memmem to find suffix occurrences directly
+    // This is much faster than scanning byte-by-byte for lowercase runs
+    let finder = memmem::Finder::new(suffix);
+
     let mut pos = start;
-
     while pos < bytes.len() {
-        // Find start of lowercase run
-        if !bytes[pos].is_ascii_lowercase() {
-            pos += 1;
+        // Find next suffix occurrence using memmem (SIMD-accelerated)
+        let Some(rel_pos) = finder.find(&bytes[pos..]) else {
+            break;
+        };
+        let suffix_start = pos + rel_pos;
+
+        // Need at least 1 lowercase char before suffix
+        if suffix_start == 0 || !bytes[suffix_start - 1].is_ascii_lowercase() {
+            pos = suffix_start + 1;
             continue;
         }
 
-        let run_start = pos;
-
-        // Find end of lowercase run
-        while pos < bytes.len() && bytes[pos].is_ascii_lowercase() {
-            pos += 1;
+        // Find start of the lowercase run (scan backwards)
+        let mut run_start = suffix_start - 1;
+        while run_start > 0 && bytes[run_start - 1].is_ascii_lowercase() {
+            run_start -= 1;
         }
 
-        let run_end = pos;
-        let run_len = run_end - run_start;
-
-        // Need at least suffix_len + 1 characters for a match
-        if run_len <= suffix_len {
-            continue;
+        // Find end of the lowercase run
+        let mut run_end = suffix_start + suffix_len;
+        while run_end < bytes.len() && bytes[run_end].is_ascii_lowercase() {
+            run_end += 1;
         }
 
-        // Search for RIGHTMOST occurrence of suffix in this run
+        // Search for RIGHTMOST suffix within this run for greedy matching
         // Start from the rightmost possible position and scan backwards
         let mut check_pos = run_end - suffix_len;
         while check_pos > run_start {
             if &bytes[check_pos..check_pos + suffix_len] == suffix {
-                // Found rightmost suffix at position check_pos
                 return Some(Match { start: run_start, end: check_pos + suffix_len });
             }
             check_pos -= 1;
         }
-        // Don't check at run_start - need at least 1 char before suffix
+
+        // Move past this run
+        pos = run_end;
     }
 
     None
