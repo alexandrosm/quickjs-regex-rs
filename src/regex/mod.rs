@@ -2217,77 +2217,96 @@ fn find_digit_run(bytes: &[u8], start: usize) -> Option<Match> {
 }
 
 /// Find a run of consecutive lowercase letters [a-z]+ starting at or after `start`
+/// Uses LLVM-vectorizable range check pattern
 #[inline]
 fn find_lower_run(bytes: &[u8], start: usize) -> Option<Match> {
-    // Find the first lowercase letter
-    let mut pos = start;
-    while pos < bytes.len() {
-        if bytes[pos].is_ascii_lowercase() {
-            // Found start, now find end
-            let match_start = pos;
-            pos += 1;
-            while pos < bytes.len() && bytes[pos].is_ascii_lowercase() {
-                pos += 1;
-            }
-            return Some(Match { start: match_start, end: pos });
-        }
-        pos += 1;
-    }
-    None
+    // Find first lowercase: b.wrapping_sub(b'a') <= 25 is vectorizable
+    let match_start = bytes[start..]
+        .iter()
+        .position(|&b| b.wrapping_sub(b'a') <= 25)
+        .map(|p| start + p)?;
+
+    // Find end of run
+    let match_end = bytes[match_start..]
+        .iter()
+        .position(|&b| b.wrapping_sub(b'a') > 25)
+        .map(|p| match_start + p)
+        .unwrap_or(bytes.len());
+
+    Some(Match { start: match_start, end: match_end })
 }
 
 /// Find a run of consecutive uppercase letters [A-Z]+ starting at or after `start`
+/// Uses LLVM-vectorizable range check pattern
 #[inline]
 fn find_upper_run(bytes: &[u8], start: usize) -> Option<Match> {
-    let mut pos = start;
-    while pos < bytes.len() {
-        if bytes[pos].is_ascii_uppercase() {
-            let match_start = pos;
-            pos += 1;
-            while pos < bytes.len() && bytes[pos].is_ascii_uppercase() {
-                pos += 1;
-            }
-            return Some(Match { start: match_start, end: pos });
-        }
-        pos += 1;
-    }
-    None
+    // Find first uppercase: b.wrapping_sub(b'A') <= 25 is vectorizable
+    let match_start = bytes[start..]
+        .iter()
+        .position(|&b| b.wrapping_sub(b'A') <= 25)
+        .map(|p| start + p)?;
+
+    // Find end of run
+    let match_end = bytes[match_start..]
+        .iter()
+        .position(|&b| b.wrapping_sub(b'A') > 25)
+        .map(|p| match_start + p)
+        .unwrap_or(bytes.len());
+
+    Some(Match { start: match_start, end: match_end })
+}
+
+/// Check if byte is ASCII alphabetic using bit trick
+/// (b | 0x20).wrapping_sub(b'a') <= 25 maps A-Z and a-z to 0-25
+#[inline(always)]
+fn is_alpha(b: u8) -> bool {
+    (b | 0x20).wrapping_sub(b'a') <= 25
+}
+
+/// Check if byte is ASCII alphanumeric
+#[inline(always)]
+fn is_alnum(b: u8) -> bool {
+    is_alpha(b) || b.wrapping_sub(b'0') <= 9
 }
 
 /// Find a run of consecutive letters [a-zA-Z]+ starting at or after `start`
+/// Uses LLVM-vectorizable bit trick for alphabet check
 #[inline]
 fn find_alpha_run(bytes: &[u8], start: usize) -> Option<Match> {
-    let mut pos = start;
-    while pos < bytes.len() {
-        if bytes[pos].is_ascii_alphabetic() {
-            let match_start = pos;
-            pos += 1;
-            while pos < bytes.len() && bytes[pos].is_ascii_alphabetic() {
-                pos += 1;
-            }
-            return Some(Match { start: match_start, end: pos });
-        }
-        pos += 1;
-    }
-    None
+    // Find first alphabetic using vectorizable pattern
+    let match_start = bytes[start..]
+        .iter()
+        .position(|&b| is_alpha(b))
+        .map(|p| start + p)?;
+
+    // Find end of run
+    let match_end = bytes[match_start..]
+        .iter()
+        .position(|&b| !is_alpha(b))
+        .map(|p| match_start + p)
+        .unwrap_or(bytes.len());
+
+    Some(Match { start: match_start, end: match_end })
 }
 
 /// Find a run of consecutive alphanumeric chars [a-zA-Z0-9]+ starting at or after `start`
+/// Uses LLVM-vectorizable patterns
 #[inline]
 fn find_alnum_run(bytes: &[u8], start: usize) -> Option<Match> {
-    let mut pos = start;
-    while pos < bytes.len() {
-        if bytes[pos].is_ascii_alphanumeric() {
-            let match_start = pos;
-            pos += 1;
-            while pos < bytes.len() && bytes[pos].is_ascii_alphanumeric() {
-                pos += 1;
-            }
-            return Some(Match { start: match_start, end: pos });
-        }
-        pos += 1;
-    }
-    None
+    // Find first alphanumeric
+    let match_start = bytes[start..]
+        .iter()
+        .position(|&b| is_alnum(b))
+        .map(|p| start + p)?;
+
+    // Find end of run
+    let match_end = bytes[match_start..]
+        .iter()
+        .position(|&b| !is_alnum(b))
+        .map(|p| match_start + p)
+        .unwrap_or(bytes.len());
+
+    Some(Match { start: match_start, end: match_end })
 }
 
 /// Find a run of consecutive word chars [a-zA-Z0-9_]+ or \w+ starting at or after `start`
