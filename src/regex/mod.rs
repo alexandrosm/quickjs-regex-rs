@@ -1307,23 +1307,16 @@ impl<'r, 't> Iterator for MatchIterator<'r, 't> {
 }
 
 /// Fast iterator for pure literal patterns
-/// Uses memchr for 2-3 byte patterns (faster for very short needles)
-/// Uses memmem for longer patterns
+/// Uses memchr for single bytes, memmem for longer patterns
 pub enum LiteralMatches<'r, 't> {
-    /// Single byte - use memchr
+    /// Single byte - use memchr (fastest for single chars)
     Single {
         bytes: &'t [u8],
         pos: usize,
         byte: u8,
     },
-    /// 2-3 byte pattern - use memchr on first byte + verify
-    Short {
-        bytes: &'t [u8],
-        pos: usize,
-        literal: &'r [u8],
-    },
-    /// Longer patterns - use memmem FindIter
-    Long {
+    /// Multi-byte patterns - use memmem FindIter (SIMD-accelerated)
+    Multi {
         inner: memmem::FindIter<'t, 'r>,
         literal_len: usize,
     },
@@ -1333,21 +1326,18 @@ impl<'r, 't> LiteralMatches<'r, 't> {
     /// Create a new literal match iterator
     fn new(literal: &'r [u8], text: &'t str) -> Self {
         let bytes = text.as_bytes();
-        match literal.len() {
-            1 => LiteralMatches::Single {
+        if literal.len() == 1 {
+            LiteralMatches::Single {
                 bytes,
                 pos: 0,
                 byte: literal[0],
-            },
-            2 | 3 => LiteralMatches::Short {
-                bytes,
-                pos: 0,
-                literal,
-            },
-            _ => LiteralMatches::Long {
+            }
+        } else {
+            // memmem is highly optimized for multi-byte patterns
+            LiteralMatches::Multi {
                 inner: memmem::find_iter(bytes, literal),
                 literal_len: literal.len(),
-            },
+            }
         }
     }
 }
@@ -1367,35 +1357,7 @@ impl<'r, 't> Iterator for LiteralMatches<'r, 't> {
                 *pos = start + 1;
                 Some(Match { start, end: start + 1 })
             }
-            LiteralMatches::Short { bytes, pos, literal } => {
-                let first_byte = literal[0];
-                let lit_len = literal.len();
-
-                while *pos + lit_len <= bytes.len() {
-                    // Use memchr to find first byte (SIMD accelerated)
-                    let Some(found) = memchr(first_byte, &bytes[*pos..]) else {
-                        *pos = bytes.len();
-                        return None;
-                    };
-                    let start = *pos + found;
-
-                    // Check if there's room for the full pattern
-                    if start + lit_len > bytes.len() {
-                        *pos = bytes.len();
-                        return None;
-                    }
-
-                    // Verify remaining bytes
-                    if &bytes[start..start + lit_len] == *literal {
-                        *pos = start + lit_len; // Non-overlapping: advance past match
-                        return Some(Match { start, end: start + lit_len });
-                    }
-
-                    *pos = start + 1;
-                }
-                None
-            }
-            LiteralMatches::Long { inner, literal_len } => {
+            LiteralMatches::Multi { inner, literal_len } => {
                 inner.next().map(|start| Match {
                     start,
                     end: start + *literal_len,
