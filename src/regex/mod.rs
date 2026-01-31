@@ -37,8 +37,505 @@ use std::ptr;
 use aho_corasick::AhoCorasick;
 use memchr::{memchr, memchr2, memchr3, memmem};
 
+// ============================================================================
+// SIMD-accelerated character class matching
+// ============================================================================
+
+/// SIMD-accelerated digit finding for x86_64 with AVX2
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+mod simd_x86 {
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    /// Find the first digit (0-9) in a byte slice using AVX2 SIMD.
+    /// Returns the index of the first digit, or None if no digit found.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn find_first_digit_avx2(bytes: &[u8]) -> Option<usize> {
+        let len = bytes.len();
+        if len == 0 {
+            return None;
+        }
+
+        let ptr = bytes.as_ptr();
+        let mut offset = 0;
+
+        // Process 32 bytes at a time with AVX2
+        if len >= 32 {
+            // Create constants: we want to find bytes where (b - '0') <= 9
+            // Since _mm256_cmpgt_epi8 does signed comparison, we use a trick:
+            // Add 118 to transform '0'..'9' (48-57) to 166-175
+            // Then compare > 165 to find non-digits, invert for digits
+            // Actually, simpler: use unsigned saturation
+            //
+            // Better approach: use the range check trick
+            // For unsigned comparison: (x - lo) <= (hi - lo)
+            // '0' = 48, '9' = 57, so check (b - 48) <= 9
+            // But we need unsigned comparison...
+            //
+            // Trick: For signed bytes, if we XOR with 0x80, we flip the sign bit
+            // This converts unsigned ordering to signed ordering
+            // But simpler: use saturating arithmetic
+            //
+            // Simplest approach for digits:
+            // 1. Subtract '0' with wrapping (digits become 0-9, others wrap)
+            // 2. Compare with max value that when added doesn't overflow for 0-9
+            //    Use: cmpgt(9, sub(b, '0')) -- but signed, need adjustment
+            //
+            // Best approach for unsigned range check with signed intrinsics:
+            // Check if (b - '0') <= 9 using: max_epu8(b - '0', 9) == 9
+            // This works because max_epu8 is unsigned!
+
+            let zero_char = _mm256_set1_epi8(b'0' as i8);
+            let nine = _mm256_set1_epi8(9);
+
+            while offset + 32 <= len {
+                let chunk = _mm256_loadu_si256(ptr.add(offset) as *const __m256i);
+                // Subtract '0' - digits become 0-9, others become large values (wrapping)
+                let sub = _mm256_sub_epi8(chunk, zero_char);
+                // Unsigned max with 9 - for digits (0-9), result is 9; for others, result is > 9
+                let maxed = _mm256_max_epu8(sub, nine);
+                // Compare equal to 9 - digits match, others don't
+                let is_digit = _mm256_cmpeq_epi8(maxed, nine);
+                // Get bitmask
+                let mask = _mm256_movemask_epi8(is_digit) as u32;
+
+                if mask != 0 {
+                    return Some(offset + mask.trailing_zeros() as usize);
+                }
+                offset += 32;
+            }
+        }
+
+        // Handle remaining bytes with SSE2 (16 at a time)
+        if offset + 16 <= len {
+            let zero_char = _mm_set1_epi8(b'0' as i8);
+            let nine = _mm_set1_epi8(9);
+
+            while offset + 16 <= len {
+                let chunk = _mm_loadu_si128(ptr.add(offset) as *const __m128i);
+                let sub = _mm_sub_epi8(chunk, zero_char);
+                let maxed = _mm_max_epu8(sub, nine);
+                let is_digit = _mm_cmpeq_epi8(maxed, nine);
+                let mask = _mm_movemask_epi8(is_digit) as u32;
+
+                if mask != 0 {
+                    return Some(offset + mask.trailing_zeros() as usize);
+                }
+                offset += 16;
+            }
+        }
+
+        // Handle remaining bytes scalar
+        for i in offset..len {
+            let b = *ptr.add(i);
+            if b.wrapping_sub(b'0') <= 9 {
+                return Some(i);
+            }
+        }
+
+        None
+    }
+}
+
+/// SIMD-accelerated digit finding for x86_64 with SSE2 (baseline)
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+mod simd_x86 {
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    /// Find the first digit using SSE2 (available on all x86_64)
+    #[inline]
+    #[target_feature(enable = "sse2")]
+    pub unsafe fn find_first_digit_sse2(bytes: &[u8]) -> Option<usize> {
+        let len = bytes.len();
+        if len == 0 {
+            return None;
+        }
+
+        let ptr = bytes.as_ptr();
+        let mut offset = 0;
+
+        // Process 16 bytes at a time with SSE2
+        if len >= 16 {
+            let zero_char = _mm_set1_epi8(b'0' as i8);
+            let nine = _mm_set1_epi8(9);
+
+            while offset + 16 <= len {
+                let chunk = _mm_loadu_si128(ptr.add(offset) as *const __m128i);
+                let sub = _mm_sub_epi8(chunk, zero_char);
+                let maxed = _mm_max_epu8(sub, nine);
+                let is_digit = _mm_cmpeq_epi8(maxed, nine);
+                let mask = _mm_movemask_epi8(is_digit) as u32;
+
+                if mask != 0 {
+                    return Some(offset + mask.trailing_zeros() as usize);
+                }
+                offset += 16;
+            }
+        }
+
+        // Handle remaining bytes scalar
+        for i in offset..len {
+            let b = *ptr.add(i);
+            if b.wrapping_sub(b'0') <= 9 {
+                return Some(i);
+            }
+        }
+
+        None
+    }
+}
+
+/// SIMD-accelerated digit finding for aarch64 with NEON
+#[cfg(target_arch = "aarch64")]
+mod simd_aarch64 {
+    use std::arch::aarch64::*;
+
+    /// Find the first digit using NEON (ARM64)
+    #[inline]
+    pub unsafe fn find_first_digit_neon(bytes: &[u8]) -> Option<usize> {
+        let len = bytes.len();
+        if len == 0 {
+            return None;
+        }
+
+        let ptr = bytes.as_ptr();
+        let mut offset = 0;
+
+        // Process 16 bytes at a time with NEON
+        if len >= 16 {
+            let zero_char = vdupq_n_u8(b'0');
+            let nine = vdupq_n_u8(9);
+
+            while offset + 16 <= len {
+                let chunk = vld1q_u8(ptr.add(offset));
+                // Subtract '0' with wrapping
+                let sub = vsubq_u8(chunk, zero_char);
+                // Compare <= 9 (unsigned): use vcleq_u8
+                let is_digit = vcleq_u8(sub, nine);
+
+                // Find first match - NEON doesn't have movemask, so we reduce
+                // Use horizontal max to check if any match
+                let has_match = vmaxvq_u8(is_digit);
+                if has_match != 0 {
+                    // Find the exact position
+                    let mut mask_bytes = [0u8; 16];
+                    vst1q_u8(mask_bytes.as_mut_ptr(), is_digit);
+                    for (i, &m) in mask_bytes.iter().enumerate() {
+                        if m != 0 {
+                            return Some(offset + i);
+                        }
+                    }
+                }
+                offset += 16;
+            }
+        }
+
+        // Handle remaining bytes scalar
+        for i in offset..len {
+            let b = *ptr.add(i);
+            if b.wrapping_sub(b'0') <= 9 {
+                return Some(i);
+            }
+        }
+
+        None
+    }
+}
+
+// Inline SIMD digit finder for x86_64 with AVX2 (32 bytes at a time)
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline(always)]
+fn find_first_digit_simd(bytes: &[u8]) -> Option<usize> {
+    // AVX2 is available at compile time - use 32-byte processing
+    unsafe { find_first_digit_avx2_inline(bytes) }
+}
+
+// Fallback SSE2 for x86_64 without AVX2
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+#[inline(always)]
+fn find_first_digit_simd(bytes: &[u8]) -> Option<usize> {
+    // SSE2 is guaranteed on x86_64, use 16-byte processing
+    unsafe { find_first_digit_sse2_inline(bytes) }
+}
+
+/// AVX2 implementation - processes 32 bytes at a time
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline(always)]
+unsafe fn find_first_digit_avx2_inline(bytes: &[u8]) -> Option<usize> {
+    use std::arch::x86_64::*;
+
+    let len = bytes.len();
+    if len == 0 {
+        return None;
+    }
+
+    let ptr = bytes.as_ptr();
+    let mut offset = 0;
+
+    // Process 32 bytes at a time with AVX2
+    if len >= 32 {
+        let zero_char = _mm256_set1_epi8(b'0' as i8);
+        let nine = _mm256_set1_epi8(9);
+
+        while offset + 32 <= len {
+            let chunk = _mm256_loadu_si256(ptr.add(offset) as *const __m256i);
+            let sub = _mm256_sub_epi8(chunk, zero_char);
+            let maxed = _mm256_max_epu8(sub, nine);
+            let is_digit = _mm256_cmpeq_epi8(maxed, nine);
+            let mask = _mm256_movemask_epi8(is_digit) as u32;
+
+            if mask != 0 {
+                return Some(offset + mask.trailing_zeros() as usize);
+            }
+            offset += 32;
+        }
+    }
+
+    // Handle tail with SSE2 (16 bytes)
+    if offset + 16 <= len {
+        let zero_char = _mm_set1_epi8(b'0' as i8);
+        let nine = _mm_set1_epi8(9);
+
+        while offset + 16 <= len {
+            let chunk = _mm_loadu_si128(ptr.add(offset) as *const __m128i);
+            let sub = _mm_sub_epi8(chunk, zero_char);
+            let maxed = _mm_max_epu8(sub, nine);
+            let is_digit = _mm_cmpeq_epi8(maxed, nine);
+            let mask = _mm_movemask_epi8(is_digit) as u32;
+
+            if mask != 0 {
+                return Some(offset + mask.trailing_zeros() as usize);
+            }
+            offset += 16;
+        }
+    }
+
+    // Scalar tail
+    while offset < len {
+        if (*ptr.add(offset)).wrapping_sub(b'0') <= 9 {
+            return Some(offset);
+        }
+        offset += 1;
+    }
+
+    None
+}
+
+/// SSE2 implementation - processes 16 bytes at a time
+/// SSE2 is always available on x86_64
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+#[inline(always)]
+unsafe fn find_first_digit_sse2_inline(bytes: &[u8]) -> Option<usize> {
+    use std::arch::x86_64::*;
+
+    let len = bytes.len();
+    if len == 0 {
+        return None;
+    }
+
+    let ptr = bytes.as_ptr();
+    let mut offset = 0;
+
+    // Process 16 bytes at a time
+    if len >= 16 {
+        // Constants: check (b - '0') <= 9
+        let zero_char = _mm_set1_epi8(b'0' as i8);
+        let nine = _mm_set1_epi8(9);
+
+        while offset + 16 <= len {
+            let chunk = _mm_loadu_si128(ptr.add(offset) as *const __m128i);
+            // Subtract '0' - digits become 0-9, others wrap to large values
+            let sub = _mm_sub_epi8(chunk, zero_char);
+            // Unsigned max(sub, 9) - for digits result is 9, for others > 9
+            let maxed = _mm_max_epu8(sub, nine);
+            // Compare equal to 9 - digits match
+            let is_digit = _mm_cmpeq_epi8(maxed, nine);
+            // Extract bitmask
+            let mask = _mm_movemask_epi8(is_digit) as u32;
+
+            if mask != 0 {
+                return Some(offset + mask.trailing_zeros() as usize);
+            }
+            offset += 16;
+        }
+    }
+
+    // Scalar tail
+    while offset < len {
+        if (*ptr.add(offset)).wrapping_sub(b'0') <= 9 {
+            return Some(offset);
+        }
+        offset += 1;
+    }
+
+    None
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn find_first_digit_simd(bytes: &[u8]) -> Option<usize> {
+    // SAFETY: NEON is always available on aarch64
+    unsafe { simd_aarch64::find_first_digit_neon(bytes) }
+}
+
+// Fallback for other architectures
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[inline]
+fn find_first_digit_simd(bytes: &[u8]) -> Option<usize> {
+    // Use the portable implementation
+    bytes.iter().position(|&b| b.wrapping_sub(b'0') <= 9)
+}
+
 // Threshold for using optimizations (bytes)
 const OPTIMIZATION_THRESHOLD: usize = 32;
+
+// ============================================================================
+// OwnedFinder - Precomputed memmem::Finder with owned needle
+// ============================================================================
+
+/// A memmem::Finder that owns its needle, avoiding per-search preprocessing.
+/// For short patterns, uses a rare-byte search strategy for better performance.
+struct OwnedFinder {
+    // IMPORTANT: finder must be declared before needle for correct drop order.
+    finder: memmem::Finder<'static>,
+    needle: Box<[u8]>,
+    // Precomputed rare byte info for short patterns
+    rare_byte: u8,
+    rare_byte_offset: usize,
+}
+
+impl Clone for OwnedFinder {
+    fn clone(&self) -> Self {
+        Self::new(self.needle.to_vec())
+    }
+}
+
+/// Byte frequency heuristic - lower score = rarer byte
+/// Based on English letter frequency
+#[inline]
+fn byte_rarity_score(b: u8) -> u8 {
+    match b {
+        // Most common English letters (higher score = more common)
+        b'e' | b'E' => 255,
+        b't' | b'T' => 240,
+        b'a' | b'A' => 230,
+        b'o' | b'O' => 220,
+        b'i' | b'I' => 210,
+        b'n' | b'N' => 200,
+        b's' | b'S' => 190,
+        b'h' | b'H' => 180,
+        b'r' | b'R' => 170,
+        b' ' => 250, // Space is very common
+        // Less common letters
+        b'l' | b'L' => 100,
+        b'd' | b'D' => 90,
+        b'c' | b'C' => 80,
+        b'u' | b'U' => 70,
+        b'm' | b'M' => 60,
+        b'w' | b'W' => 50,
+        b'f' | b'F' => 45,
+        b'g' | b'G' => 40,
+        b'y' | b'Y' => 35,
+        b'p' | b'P' => 30,
+        b'b' | b'B' => 25,
+        b'v' | b'V' => 20,
+        b'k' | b'K' => 15,
+        // Rare letters and other chars
+        b'j' | b'J' | b'x' | b'X' | b'q' | b'Q' | b'z' | b'Z' => 5,
+        // Digits are moderately rare
+        b'0'..=b'9' => 30,
+        // Punctuation and other ASCII
+        _ if b.is_ascii() => 20,
+        // Non-ASCII is rare
+        _ => 10,
+    }
+}
+
+impl OwnedFinder {
+    /// Create a new OwnedFinder from a needle.
+    fn new(needle: Vec<u8>) -> Self {
+        let needle = needle.into_boxed_slice();
+
+        // Find the rarest byte in the needle
+        let (rare_byte_offset, rare_byte) = needle.iter()
+            .enumerate()
+            .min_by_key(|(_, &b)| byte_rarity_score(b))
+            .map(|(i, &b)| (i, b))
+            .unwrap_or((0, needle.get(0).copied().unwrap_or(0)));
+
+        // SAFETY: We extend the lifetime to 'static, but the finder is only
+        // accessed through &self methods, and self owns the needle data.
+        let finder = unsafe {
+            let needle_ref: &'static [u8] = &*(needle.as_ref() as *const [u8]);
+            memmem::Finder::new(needle_ref)
+        };
+        Self { finder, needle, rare_byte, rare_byte_offset }
+    }
+
+    /// Find the needle in the haystack.
+    #[inline(always)]
+    fn find(&self, haystack: &[u8]) -> Option<usize> {
+        // Use precomputed memmem::Finder - best general-purpose algorithm
+        self.finder.find(haystack)
+    }
+
+    /// Search by finding the rare byte first, then verifying the pattern.
+    #[inline]
+    fn find_rare_byte_first(&self, haystack: &[u8]) -> Option<usize> {
+        let needle = &self.needle;
+        let needle_len = needle.len();
+
+        if haystack.len() < needle_len {
+            return None;
+        }
+
+        let max_start = haystack.len() - needle_len;
+        let rare_offset = self.rare_byte_offset;
+        let mut search_start = 0;
+
+        while search_start <= max_start {
+            // Find the rare byte at its expected position
+            let search_from = search_start + rare_offset;
+            if search_from > haystack.len() {
+                return None;
+            }
+
+            if let Some(pos) = memchr(self.rare_byte, &haystack[search_from..]) {
+                let candidate = search_from + pos - rare_offset;
+
+                // Check bounds
+                if candidate > max_start {
+                    return None;
+                }
+
+                // Verify the entire pattern
+                if &haystack[candidate..candidate + needle_len] == needle.as_ref() {
+                    return Some(candidate);
+                }
+
+                // Move past this position
+                search_start = candidate + 1;
+            } else {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Get the needle bytes.
+    #[inline(always)]
+    fn needle(&self) -> &[u8] {
+        &self.needle
+    }
+
+    /// Get the needle length.
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.needle.len()
+    }
+}
 
 // ============================================================================
 // ByteBitmap - 256-bit bitmap for fast byte set membership testing
@@ -143,16 +640,16 @@ enum SearchStrategy {
     Anchored,
     /// Pattern is ^literal - anchored pure literal
     AnchoredLiteral(Vec<u8>),
-    /// Pattern is a pure literal - no engine needed!
-    PureLiteral(Vec<u8>),
+    /// Pattern is a pure literal - no engine needed! Uses precomputed Finder.
+    PureLiteral(OwnedFinder),
     /// Single literal byte to search for
     SingleByte(u8),
     /// Two possible first bytes (e.g., alternation or case-insensitive)
     TwoBytes(u8, u8),
     /// Three possible first bytes
     ThreeBytes(u8, u8, u8),
-    /// Multi-byte literal prefix
-    LiteralPrefix(Vec<u8>),
+    /// Multi-byte literal prefix with precomputed Finder
+    LiteralPrefix(OwnedFinder),
     /// Alternation of pure literals - use Aho-Corasick!
     AlternationLiterals {
         literals: Vec<Vec<u8>>,
@@ -196,11 +693,11 @@ impl std::fmt::Debug for SearchStrategy {
         match self {
             SearchStrategy::Anchored => write!(f, "Anchored"),
             SearchStrategy::AnchoredLiteral(lit) => write!(f, "AnchoredLiteral({:?})", String::from_utf8_lossy(lit)),
-            SearchStrategy::PureLiteral(lit) => write!(f, "PureLiteral({:?})", String::from_utf8_lossy(lit)),
+            SearchStrategy::PureLiteral(finder) => write!(f, "PureLiteral({:?})", String::from_utf8_lossy(finder.needle())),
             SearchStrategy::SingleByte(b) => write!(f, "SingleByte({:?})", *b as char),
             SearchStrategy::TwoBytes(b1, b2) => write!(f, "TwoBytes({:?}, {:?})", *b1 as char, *b2 as char),
             SearchStrategy::ThreeBytes(b1, b2, b3) => write!(f, "ThreeBytes({:?}, {:?}, {:?})", *b1 as char, *b2 as char, *b3 as char),
-            SearchStrategy::LiteralPrefix(lit) => write!(f, "LiteralPrefix({:?})", String::from_utf8_lossy(lit)),
+            SearchStrategy::LiteralPrefix(finder) => write!(f, "LiteralPrefix({:?})", String::from_utf8_lossy(finder.needle())),
             SearchStrategy::AlternationLiterals { literals, .. } => {
                 let strs: Vec<_> = literals.iter().map(|l| String::from_utf8_lossy(l).to_string()).collect();
                 write!(f, "AlternationLiterals({:?})", strs)
@@ -425,21 +922,13 @@ impl Regex {
 
     /// Find a pure literal pattern - no engine needed!
     #[inline]
-    fn find_pure_literal(&self, text: &str, literal: &[u8]) -> Option<Match> {
+    fn find_pure_literal(&self, text: &str, finder: &OwnedFinder) -> Option<Match> {
         let bytes = text.as_bytes();
-        if literal.len() == 1 {
-            // Single byte - use memchr directly
-            memchr(literal[0], bytes).map(|pos| Match {
-                start: pos,
-                end: pos + 1,
-            })
-        } else {
-            // Multi-byte - use memmem
-            memmem::find(bytes, literal).map(|pos| Match {
-                start: pos,
-                end: pos + literal.len(),
-            })
-        }
+        // Use precomputed finder - no per-call preprocessing!
+        finder.find(bytes).map(|pos| Match {
+            start: pos,
+            end: pos + finder.len(),
+        })
     }
 
     /// Find using single-byte search (fastest) - used by find()
@@ -501,11 +990,10 @@ impl Regex {
 
     /// Find using literal prefix search (memmem) - used by find()
     #[inline]
-    fn find_with_literal_prefix(&self, text: &str, prefix: &[u8]) -> Option<Match> {
-        let finder = memmem::Finder::new(prefix);
+    fn find_with_literal_prefix(&self, text: &str, finder: &OwnedFinder) -> Option<Match> {
         let bytes = text.as_bytes();
-
-        for pos in finder.find_iter(bytes) {
+        // Use precomputed finder for iteration
+        for pos in finder.finder.find_iter(bytes) {
             if let Some(m) = self.try_match_at(text, pos) {
                 return Some(m);
             }
@@ -670,11 +1158,10 @@ impl Regex {
                 }
             }
 
-            SearchStrategy::PureLiteral(literal) => {
-                // Fast literal search using memchr + verify pattern
-                // This avoids memmem::Finder creation overhead for repeated calls
-                find_literal_fast(&text_bytes[start..], literal)
-                    .map(|pos| Match { start: start + pos, end: start + pos + literal.len() })
+            SearchStrategy::PureLiteral(finder) => {
+                // Use precomputed finder - no per-call preprocessing overhead!
+                finder.find(&text_bytes[start..])
+                    .map(|pos| Match { start: start + pos, end: start + pos + finder.len() })
             }
 
             SearchStrategy::SingleByte(b) => {
@@ -842,11 +1329,10 @@ impl Regex {
 
     /// Find match using literal prefix memmem scanning
     #[inline]
-    fn find_at_literal_prefix(&self, text: &str, start: usize, prefix: &[u8]) -> Option<Match> {
+    fn find_at_literal_prefix(&self, text: &str, start: usize, finder: &OwnedFinder) -> Option<Match> {
         let bytes = &text.as_bytes()[start..];
-        let finder = memmem::Finder::new(prefix);
-
-        for pos in finder.find_iter(bytes) {
+        // Use precomputed finder for iteration
+        for pos in finder.finder.find_iter(bytes) {
             let abs_pos = start + pos;
             if let Some(m) = self.try_match_at(text, abs_pos) {
                 return Some(m);
@@ -1062,8 +1548,8 @@ impl Regex {
     pub fn find_iter<'r, 't>(&'r self, text: &'t str) -> MatchIterator<'r, 't> {
         // Use specialized iterator for patterns we can handle super fast
         match &self.strategy {
-            SearchStrategy::PureLiteral(literal) => {
-                MatchIterator::Literal(LiteralMatches::new(literal.as_slice(), text))
+            SearchStrategy::PureLiteral(finder) => {
+                MatchIterator::Literal(LiteralMatches::new(finder.needle(), text))
             }
             SearchStrategy::AlternationLiterals { literals, ac } => {
                 MatchIterator::Alternation(AlternationMatches {
@@ -1766,10 +2252,10 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
             }
             SearchStrategy::None
         }
-        1 if is_pure_literal => SearchStrategy::PureLiteral(literals),
+        1 if is_pure_literal => SearchStrategy::PureLiteral(OwnedFinder::new(literals)),
         1 => SearchStrategy::SingleByte(literals[0]),
-        _ if is_pure_literal => SearchStrategy::PureLiteral(literals),
-        _ => SearchStrategy::LiteralPrefix(literals),
+        _ if is_pure_literal => SearchStrategy::PureLiteral(OwnedFinder::new(literals)),
+        _ => SearchStrategy::LiteralPrefix(OwnedFinder::new(literals)),
     }
 }
 
@@ -2192,12 +2678,8 @@ fn find_whitespace(bytes: &[u8]) -> Option<usize> {
 /// The simple range check `b.wrapping_sub(b'0') <= 9` is easily vectorized
 #[inline]
 fn find_first_digit(bytes: &[u8], start: usize) -> Option<usize> {
-    // LLVM can auto-vectorize this loop with SIMD instructions
-    // The range check pattern is well-recognized by the optimizer
-    bytes[start..]
-        .iter()
-        .position(|&b| b.wrapping_sub(b'0') <= 9)
-        .map(|pos| start + pos)
+    // Use explicit SIMD for digit finding - much faster than LLVM auto-vectorization
+    find_first_digit_simd(&bytes[start..]).map(|pos| start + pos)
 }
 
 /// Find a run of consecutive digits [0-9]+ starting at or after `start`
@@ -2333,6 +2815,47 @@ fn find_word_run(bytes: &[u8], start: usize) -> Option<Match> {
         .unwrap_or(bytes.len());
 
     Some(Match { start: match_start, end: match_end })
+}
+
+/// Fast literal search using memchr + inline verification
+/// Optimized for repeated find_at calls - avoids memmem preprocessing overhead
+#[inline]
+fn find_literal_memchr(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+
+    let needle_len = needle.len();
+    if needle_len > haystack.len() {
+        return None;
+    }
+
+    // Single byte: just use memchr
+    if needle_len == 1 {
+        return memchr(needle[0], haystack);
+    }
+
+    // Use memchr to find first byte, then verify rest
+    let first_byte = needle[0];
+    let needle_rest = &needle[1..];
+    let mut offset = 0;
+
+    while offset + needle_len <= haystack.len() {
+        if let Some(pos) = memchr(first_byte, &haystack[offset..]) {
+            let abs_pos = offset + pos;
+            if abs_pos + needle_len > haystack.len() {
+                return None;
+            }
+            // Verify the rest of the needle
+            if &haystack[abs_pos + 1..abs_pos + needle_len] == needle_rest {
+                return Some(abs_pos);
+            }
+            offset = abs_pos + 1;
+        } else {
+            return None;
+        }
+    }
+    None
 }
 
 /// Fast literal search using memchr + verification with rare byte heuristic
@@ -2771,8 +3294,8 @@ mod tests {
         // Pure literal patterns should use PureLiteral (no engine!)
         let strategy = analyze_pattern("needle", Flags::empty());
         match strategy {
-            SearchStrategy::PureLiteral(literal) => {
-                assert_eq!(literal, b"needle");
+            SearchStrategy::PureLiteral(finder) => {
+                assert_eq!(finder.needle(), b"needle");
             }
             _ => panic!("Expected PureLiteral, got {:?}", strategy),
         }
@@ -2780,10 +3303,30 @@ mod tests {
         // Single char pure literal
         let strategy = analyze_pattern("x", Flags::empty());
         match strategy {
-            SearchStrategy::PureLiteral(literal) => {
-                assert_eq!(literal, b"x");
+            SearchStrategy::PureLiteral(finder) => {
+                assert_eq!(finder.needle(), b"x");
             }
             _ => panic!("Expected PureLiteral for single char, got {:?}", strategy),
+        }
+    }
+
+    #[test]
+    fn test_strategy_benchmark_patterns() {
+        // Verify benchmark patterns use PureLiteral
+        let strategy = analyze_pattern("Holmes", Flags::empty());
+        match strategy {
+            SearchStrategy::PureLiteral(finder) => {
+                assert_eq!(finder.needle(), b"Holmes");
+            }
+            _ => panic!("Holmes should be PureLiteral, got {:?}", strategy),
+        }
+
+        let strategy = analyze_pattern("the", Flags::empty());
+        match strategy {
+            SearchStrategy::PureLiteral(finder) => {
+                assert_eq!(finder.needle(), b"the");
+            }
+            _ => panic!("the should be PureLiteral, got {:?}", strategy),
         }
     }
 
@@ -2791,8 +3334,8 @@ mod tests {
     fn test_strategy_literal_prefix() {
         let strategy = analyze_pattern("hello.*world", Flags::empty());
         match strategy {
-            SearchStrategy::LiteralPrefix(prefix) => {
-                assert_eq!(prefix, b"hello");
+            SearchStrategy::LiteralPrefix(finder) => {
+                assert_eq!(finder.needle(), b"hello");
             }
             _ => panic!("Expected LiteralPrefix, got {:?}", strategy),
         }
