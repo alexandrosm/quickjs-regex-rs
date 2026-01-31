@@ -2333,16 +2333,15 @@ fn find_word_run(bytes: &[u8], start: usize) -> Option<Match> {
     Some(Match { start: abs_start, end })
 }
 
-/// Fast literal search using memchr + verification
-/// This is faster than memmem::find for repeated short literal searches
-/// because it avoids Finder creation overhead
+/// Fast literal search using memchr + verification with rare byte heuristic
+/// For patterns with rare bytes (uppercase, digits, punctuation), this is faster
+/// than memmem::find. For patterns with only common letters, use memmem.
 #[inline]
 fn find_literal_fast(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
 
-    let first_byte = needle[0];
     let needle_len = needle.len();
     let haystack_len = haystack.len();
 
@@ -2352,27 +2351,23 @@ fn find_literal_fast(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
     // Single byte: just use memchr
     if needle_len == 1 {
-        return memchr(first_byte, haystack);
+        return memchr(needle[0], haystack);
     }
 
-    // For 2-3 byte patterns, use memchr + simple verify
-    if needle_len <= 3 {
-        let mut offset = 0;
-        while let Some(pos) = memchr(first_byte, &haystack[offset..]) {
-            let abs_pos = offset + pos;
-            if abs_pos + needle_len <= haystack_len {
-                if &haystack[abs_pos..abs_pos + needle_len] == needle {
-                    return Some(abs_pos);
-                }
-            }
-            offset = abs_pos + 1;
-        }
-        return None;
+    // For short patterns (<=4 bytes), memmem is well-optimized
+    if needle_len <= 4 {
+        return memmem::find(haystack, needle);
     }
 
-    // For longer patterns, use memchr to find first byte, then verify
-    // Use the rare byte heuristic: search for the rarest byte in the pattern
-    let rare_byte_idx = find_rare_byte_index(needle);
+    // For longer patterns, check if there's a rare byte to search for
+    let (rare_byte_idx, rare_score) = find_rare_byte_index_with_score(needle);
+
+    // If no rare byte (score < 50), fall back to memmem
+    if rare_score < 50 {
+        return memmem::find(haystack, needle);
+    }
+
+    // Use rare byte heuristic: search for the rarest byte in the pattern
     let rare_byte = needle[rare_byte_idx];
 
     let mut offset = 0;
@@ -2407,10 +2402,11 @@ fn find_literal_fast(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
-/// Find the index of the "rarest" byte in a pattern
+/// Find the index of the "rarest" byte in a pattern, along with its rarity score
 /// Rarer bytes (less common in typical text) lead to fewer false positives
+/// Returns (index, score) where score >= 50 indicates a rare byte worth using
 #[inline]
-fn find_rare_byte_index(needle: &[u8]) -> usize {
+fn find_rare_byte_index_with_score(needle: &[u8]) -> (usize, u8) {
     // Byte frequency heuristic: uppercase, digits, and punctuation are rarer
     // Common bytes: space, e, t, a, o, i, n, s, r, h (most common in English)
     const COMMON_BYTES: [u8; 12] = [b' ', b'e', b't', b'a', b'o', b'i', b'n', b's', b'r', b'h', b'l', b'd'];
@@ -2437,7 +2433,7 @@ fn find_rare_byte_index(needle: &[u8]) -> usize {
         }
     }
 
-    best_idx
+    (best_idx, best_score)
 }
 
 /// Find a quoted string "[^"]*" or '[^']*' starting at or after `start`
