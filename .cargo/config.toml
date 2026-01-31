@@ -1,2 +1,6 @@
 [alias]
 safety = ["xtask", "safety"]
+
+# Enable AVX2 on x86_64 Linux for SIMD optimizations
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=haswell"]
