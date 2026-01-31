@@ -1544,8 +1544,15 @@ fn detect_pure_pattern(pattern: &str) -> Option<SearchStrategy> {
         return Some(SearchStrategy::PureCapitalWord);
     }
 
-    // NOTE: [a-z]+suffix pattern optimization was removed due to over-matching bug
-    // The pattern `[a-z]+ing` is handled by the interpreter with SuffixLiteral strategy
+    // Check for [a-z]+suffix patterns (e.g., [a-z]+ing)
+    // Must find lowercase runs that END with the suffix
+    if pattern.starts_with("[a-z]+") && pattern.len() > 6 {
+        let suffix = &pattern[6..];
+        // Verify suffix is pure ASCII lowercase literal
+        if suffix.bytes().all(|b| b.is_ascii_lowercase()) {
+            return Some(SearchStrategy::PureLowerSuffix(suffix.as_bytes().to_vec()));
+        }
+    }
 
     None
 }
@@ -2489,36 +2496,49 @@ fn find_capital_word(bytes: &[u8], start: usize) -> Option<Match> {
 /// Find a lowercase word ending with a literal suffix [a-z]+suffix starting at or after `start`
 /// Strategy: search for the suffix, then extend backwards to find lowercase letters
 /// Returns the match directly - NO INTERPRETER NEEDED!
+///
+/// Algorithm: Find lowercase runs and check if they END with the suffix.
+/// This matches regex semantics of [a-z]+suffix (greedy).
+///
+/// Example: "singing" with suffix "ing"
+/// - Lowercase run: "singing" (positions 0-7)
+/// - Ends with "ing"? Yes
+/// - Match: "singing"
+///
+/// This is different from finding "ing" and extending backwards,
+/// which would incorrectly match "sing" instead of "singing".
 #[inline]
 fn find_lower_suffix(bytes: &[u8], start: usize, suffix: &[u8]) -> Option<Match> {
-    let finder = memmem::Finder::new(suffix);
-    let mut search_start = start;
+    let suffix_len = suffix.len();
+    let mut pos = start;
 
-    while let Some(suffix_pos) = finder.find(&bytes[search_start..]) {
-        let abs_suffix_pos = search_start + suffix_pos;
-
-        // Validate: suffix must have lowercase letters before it
-        if abs_suffix_pos == 0 || !bytes[abs_suffix_pos - 1].is_ascii_lowercase() {
-            // No lowercase before suffix, move past this match
-            search_start = abs_suffix_pos + 1;
+    while pos < bytes.len() {
+        // Find start of lowercase run
+        if !bytes[pos].is_ascii_lowercase() {
+            pos += 1;
             continue;
         }
 
-        // Extend backwards to find start of lowercase run
-        let mut match_start = abs_suffix_pos;
-        while match_start > 0 && bytes[match_start - 1].is_ascii_lowercase() {
-            match_start -= 1;
+        let run_start = pos;
+
+        // Find end of lowercase run
+        while pos < bytes.len() && bytes[pos].is_ascii_lowercase() {
+            pos += 1;
         }
 
-        // Must have at least one lowercase letter before the suffix
-        if match_start < abs_suffix_pos {
-            let match_end = abs_suffix_pos + suffix.len();
-            return Some(Match { start: match_start, end: match_end });
-        }
+        let run_end = pos;
+        let run_len = run_end - run_start;
 
-        // Move past this position
-        search_start = abs_suffix_pos + 1;
+        // Check if run ends with the suffix AND has at least one char before suffix
+        if run_len > suffix_len {
+            let suffix_start = run_end - suffix_len;
+            if &bytes[suffix_start..run_end] == suffix {
+                // Match! The entire run is the match
+                return Some(Match { start: run_start, end: run_end });
+            }
+        }
     }
+
     None
 }
 
