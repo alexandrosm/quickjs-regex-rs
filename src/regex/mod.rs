@@ -671,14 +671,10 @@ impl Regex {
             }
 
             SearchStrategy::PureLiteral(literal) => {
-                // Direct memmem search - no interpreter needed!
-                if literal.len() == 1 {
-                    memchr(literal[0], &text_bytes[start..])
-                        .map(|pos| Match { start: start + pos, end: start + pos + 1 })
-                } else {
-                    memmem::find(&text_bytes[start..], literal)
-                        .map(|pos| Match { start: start + pos, end: start + pos + literal.len() })
-                }
+                // Fast literal search using memchr + verify pattern
+                // This avoids memmem::Finder creation overhead for repeated calls
+                find_literal_fast(&text_bytes[start..], literal)
+                    .map(|pos| Match { start: start + pos, end: start + pos + literal.len() })
             }
 
             SearchStrategy::SingleByte(b) => {
@@ -2335,6 +2331,113 @@ fn find_word_run(bytes: &[u8], start: usize) -> Option<Match> {
     }
 
     Some(Match { start: abs_start, end })
+}
+
+/// Fast literal search using memchr + verification
+/// This is faster than memmem::find for repeated short literal searches
+/// because it avoids Finder creation overhead
+#[inline]
+fn find_literal_fast(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+
+    let first_byte = needle[0];
+    let needle_len = needle.len();
+    let haystack_len = haystack.len();
+
+    if needle_len > haystack_len {
+        return None;
+    }
+
+    // Single byte: just use memchr
+    if needle_len == 1 {
+        return memchr(first_byte, haystack);
+    }
+
+    // For 2-3 byte patterns, use memchr + simple verify
+    if needle_len <= 3 {
+        let mut offset = 0;
+        while let Some(pos) = memchr(first_byte, &haystack[offset..]) {
+            let abs_pos = offset + pos;
+            if abs_pos + needle_len <= haystack_len {
+                if &haystack[abs_pos..abs_pos + needle_len] == needle {
+                    return Some(abs_pos);
+                }
+            }
+            offset = abs_pos + 1;
+        }
+        return None;
+    }
+
+    // For longer patterns, use memchr to find first byte, then verify
+    // Use the rare byte heuristic: search for the rarest byte in the pattern
+    let rare_byte_idx = find_rare_byte_index(needle);
+    let rare_byte = needle[rare_byte_idx];
+
+    let mut offset = 0;
+    while offset + needle_len <= haystack_len {
+        // Search for the rare byte at its expected position
+        let search_start = offset + rare_byte_idx;
+        if search_start >= haystack_len {
+            break;
+        }
+
+        if let Some(rare_pos) = memchr(rare_byte, &haystack[search_start..]) {
+            let candidate_start = search_start + rare_pos - rare_byte_idx;
+
+            // Check if candidate is valid and within bounds
+            if candidate_start >= offset && candidate_start + needle_len <= haystack_len {
+                // Verify the entire pattern
+                if &haystack[candidate_start..candidate_start + needle_len] == needle {
+                    return Some(candidate_start);
+                }
+            }
+
+            // Move past this position
+            offset = search_start + rare_pos + 1;
+            if rare_byte_idx > 0 {
+                offset = offset.saturating_sub(rare_byte_idx);
+            }
+        } else {
+            break;
+        }
+    }
+
+    None
+}
+
+/// Find the index of the "rarest" byte in a pattern
+/// Rarer bytes (less common in typical text) lead to fewer false positives
+#[inline]
+fn find_rare_byte_index(needle: &[u8]) -> usize {
+    // Byte frequency heuristic: uppercase, digits, and punctuation are rarer
+    // Common bytes: space, e, t, a, o, i, n, s, r, h (most common in English)
+    const COMMON_BYTES: [u8; 12] = [b' ', b'e', b't', b'a', b'o', b'i', b'n', b's', b'r', b'h', b'l', b'd'];
+
+    let mut best_idx = 0;
+    let mut best_score = 0u8;
+
+    for (i, &b) in needle.iter().enumerate() {
+        let score = if b.is_ascii_uppercase() {
+            200 // Uppercase letters are rare
+        } else if b.is_ascii_digit() {
+            150 // Digits are somewhat rare
+        } else if !b.is_ascii_alphanumeric() && b != b' ' {
+            180 // Punctuation is rare
+        } else if COMMON_BYTES.contains(&b.to_ascii_lowercase()) {
+            10 // Common letters
+        } else {
+            50 // Other lowercase letters
+        };
+
+        if score > best_score {
+            best_score = score;
+            best_idx = i;
+        }
+    }
+
+    best_idx
 }
 
 /// Find a quoted string "[^"]*" or '[^']*' starting at or after `start`
