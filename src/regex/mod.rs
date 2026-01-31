@@ -183,6 +183,10 @@ enum SearchStrategy {
     PureWordPlus,
     /// Pure "[^"]*" - scan quoted strings directly
     QuotedString(u8), // the quote character
+    /// Pure [A-Z][a-z]+ - capital letter followed by lowercase letters
+    PureCapitalWord,
+    /// Pure [a-z]+suffix - lowercase letters ending with a literal suffix
+    PureLowerSuffix(Vec<u8>), // the suffix (e.g., "ing")
     /// No optimization available - scan every position
     None,
 }
@@ -213,6 +217,8 @@ impl std::fmt::Debug for SearchStrategy {
             SearchStrategy::PureAlnumPlus => write!(f, "PureAlnumPlus"),
             SearchStrategy::PureWordPlus => write!(f, "PureWordPlus"),
             SearchStrategy::QuotedString(q) => write!(f, "QuotedString({:?})", *q as char),
+            SearchStrategy::PureCapitalWord => write!(f, "PureCapitalWord"),
+            SearchStrategy::PureLowerSuffix(s) => write!(f, "PureLowerSuffix({:?})", String::from_utf8_lossy(s)),
             SearchStrategy::None => write!(f, "None"),
         }
     }
@@ -387,6 +393,14 @@ impl Regex {
 
             SearchStrategy::QuotedString(quote) => {
                 find_quoted_string(text.as_bytes(), 0, *quote)
+            }
+
+            SearchStrategy::PureCapitalWord => {
+                find_capital_word(text.as_bytes(), 0)
+            }
+
+            SearchStrategy::PureLowerSuffix(suffix) => {
+                find_lower_suffix(text.as_bytes(), 0, suffix)
             }
 
             SearchStrategy::None => {
@@ -736,6 +750,14 @@ impl Regex {
                 find_quoted_string(text_bytes, start, *quote)
             }
 
+            SearchStrategy::PureCapitalWord => {
+                find_capital_word(text_bytes, start)
+            }
+
+            SearchStrategy::PureLowerSuffix(suffix) => {
+                find_lower_suffix(text_bytes, start, suffix)
+            }
+
             SearchStrategy::None => {
                 self.find_at_linear(text, start)
             }
@@ -1069,6 +1091,12 @@ impl Regex {
             SearchStrategy::QuotedString(quote) => {
                 MatchIterator::QuotedStr(QuotedStringMatches { text, pos: 0, quote: *quote })
             }
+            SearchStrategy::PureCapitalWord => {
+                MatchIterator::CapitalWord(CapitalWordMatches { text, pos: 0 })
+            }
+            SearchStrategy::PureLowerSuffix(suffix) => {
+                MatchIterator::LowerSuffix(LowerSuffixMatches { text, pos: 0, suffix: suffix.clone() })
+            }
             _ => {
                 MatchIterator::General(Matches {
                     regex: self,
@@ -1264,6 +1292,8 @@ pub enum MatchIterator<'r, 't> {
     PureDigit(PureDigitMatches<'t>),
     PureWord(PureWordMatches<'t>),
     QuotedStr(QuotedStringMatches<'t>),
+    CapitalWord(CapitalWordMatches<'t>),
+    LowerSuffix(LowerSuffixMatches<'t>),
     General(Matches<'r, 't>),
 }
 
@@ -1277,6 +1307,8 @@ impl<'r, 't> Iterator for MatchIterator<'r, 't> {
             MatchIterator::PureDigit(d) => d.next(),
             MatchIterator::PureWord(w) => w.next(),
             MatchIterator::QuotedStr(q) => q.next(),
+            MatchIterator::CapitalWord(c) => c.next(),
+            MatchIterator::LowerSuffix(s) => s.next(),
             MatchIterator::General(gen) => gen.next(),
         }
     }
@@ -1391,6 +1423,41 @@ impl<'t> Iterator for QuotedStringMatches<'t> {
     }
 }
 
+/// Fast iterator for capital word patterns [A-Z][a-z]+ - NO INTERPRETER!
+pub struct CapitalWordMatches<'t> {
+    text: &'t str,
+    pos: usize,
+}
+
+impl<'t> Iterator for CapitalWordMatches<'t> {
+    type Item = Match;
+
+    fn next(&mut self) -> Option<Match> {
+        let bytes = self.text.as_bytes();
+        let m = find_capital_word(bytes, self.pos)?;
+        self.pos = m.end;
+        Some(m)
+    }
+}
+
+/// Fast iterator for lowercase+suffix patterns [a-z]+ing - NO INTERPRETER!
+pub struct LowerSuffixMatches<'t> {
+    text: &'t str,
+    pos: usize,
+    suffix: Vec<u8>,
+}
+
+impl<'t> Iterator for LowerSuffixMatches<'t> {
+    type Item = Match;
+
+    fn next(&mut self) -> Option<Match> {
+        let bytes = self.text.as_bytes();
+        let m = find_lower_suffix(bytes, self.pos, &self.suffix)?;
+        self.pos = m.end;
+        Some(m)
+    }
+}
+
 /// An iterator over all non-overlapping matches in a string.
 pub struct Matches<'r, 't> {
     regex: &'r Regex,
@@ -1477,6 +1544,20 @@ fn detect_pure_pattern(pattern: &str) -> Option<SearchStrategy> {
     }
     if pattern == r"'[^']*'" {
         return Some(SearchStrategy::QuotedString(b'\''));
+    }
+
+    // Check for [A-Z][a-z]+ (capital word)
+    if pattern == "[A-Z][a-z]+" {
+        return Some(SearchStrategy::PureCapitalWord);
+    }
+
+    // Check for [a-z]+suffix patterns (e.g., [a-z]+ing)
+    if pattern.starts_with("[a-z]+") && pattern.len() > 6 {
+        let suffix = &pattern[6..];
+        // Verify suffix is pure ASCII lowercase literal
+        if suffix.bytes().all(|b| b.is_ascii_lowercase()) {
+            return Some(SearchStrategy::PureLowerSuffix(suffix.as_bytes().to_vec()));
+        }
     }
 
     None
@@ -2235,6 +2316,73 @@ fn find_quoted_string(bytes: &[u8], start: usize, quote: u8) -> Option<Match> {
 
     // Match includes both quotes
     Some(Match { start: abs_open, end: abs_close + 1 })
+}
+
+/// Find a capital word [A-Z][a-z]+ starting at or after `start`
+/// Returns the match directly - NO INTERPRETER NEEDED!
+#[inline]
+fn find_capital_word(bytes: &[u8], start: usize) -> Option<Match> {
+    let mut pos = start;
+
+    while pos < bytes.len() {
+        let b = bytes[pos];
+
+        // Found uppercase letter?
+        if b.is_ascii_uppercase() {
+            let match_start = pos;
+            pos += 1;
+
+            // Must have at least one lowercase letter following
+            if pos < bytes.len() && bytes[pos].is_ascii_lowercase() {
+                pos += 1;
+                // Consume all following lowercase letters
+                while pos < bytes.len() && bytes[pos].is_ascii_lowercase() {
+                    pos += 1;
+                }
+                return Some(Match { start: match_start, end: pos });
+            }
+            // No lowercase letter - continue searching
+        } else {
+            pos += 1;
+        }
+    }
+    None
+}
+
+/// Find a lowercase word ending with a literal suffix [a-z]+suffix starting at or after `start`
+/// Strategy: search for the suffix, then extend backwards to find lowercase letters
+/// Returns the match directly - NO INTERPRETER NEEDED!
+#[inline]
+fn find_lower_suffix(bytes: &[u8], start: usize, suffix: &[u8]) -> Option<Match> {
+    let finder = memmem::Finder::new(suffix);
+    let mut search_start = start;
+
+    while let Some(suffix_pos) = finder.find(&bytes[search_start..]) {
+        let abs_suffix_pos = search_start + suffix_pos;
+
+        // Validate: suffix must have lowercase letters before it
+        if abs_suffix_pos == 0 || !bytes[abs_suffix_pos - 1].is_ascii_lowercase() {
+            // No lowercase before suffix, move past this match
+            search_start = abs_suffix_pos + 1;
+            continue;
+        }
+
+        // Extend backwards to find start of lowercase run
+        let mut match_start = abs_suffix_pos;
+        while match_start > 0 && bytes[match_start - 1].is_ascii_lowercase() {
+            match_start -= 1;
+        }
+
+        // Must have at least one lowercase letter before the suffix
+        if match_start < abs_suffix_pos {
+            let match_end = abs_suffix_pos + suffix.len();
+            return Some(Match { start: match_start, end: match_end });
+        }
+
+        // Move past this position
+        search_start = abs_suffix_pos + 1;
+    }
+    None
 }
 
 #[cfg(test)]
