@@ -1334,13 +1334,6 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
                 // Character class - try to extract specific bytes
                 is_pure_literal = false;
                 if literals.is_empty() {
-                    // Before returning, check if a suffix literal would be better
-                    // For patterns like [a-z]+ing, "ing" is a better anchor than [a-z]
-                    if let Some(suffix) = extract_suffix_literal(pattern) {
-                        if suffix.len() >= 3 {
-                            return SearchStrategy::SuffixLiteral(suffix);
-                        }
-                    }
                     return analyze_char_class(&mut chars, case_insensitive);
                 }
                 break;
