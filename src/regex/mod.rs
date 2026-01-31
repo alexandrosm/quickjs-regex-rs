@@ -2188,27 +2188,16 @@ fn find_whitespace(bytes: &[u8]) -> Option<usize> {
 // PURE FAST PATHS - Complete pattern matching without interpreter
 // ============================================================================
 
-/// Find the first digit in bytes[start..] using SIMD-accelerated memchr3
+/// Find the first digit in bytes[start..] using LLVM auto-vectorization
+/// The simple range check `b.wrapping_sub(b'0') <= 9` is easily vectorized
 #[inline]
 fn find_first_digit(bytes: &[u8], start: usize) -> Option<usize> {
-    if start >= bytes.len() {
-        return None;
-    }
-    let slice = &bytes[start..];
-
-    // Use memchr3 to search for digits in batches of 3
-    // Each memchr3 call is SIMD-accelerated
-    let pos1 = memchr::memchr3(b'0', b'1', b'2', slice);
-    let pos2 = memchr::memchr3(b'3', b'4', b'5', slice);
-    let pos3 = memchr::memchr3(b'6', b'7', b'8', slice);
-    let pos4 = memchr::memchr(b'9', slice);
-
-    // Find the minimum position among all searches
-    [pos1, pos2, pos3, pos4]
-        .into_iter()
-        .flatten()
-        .min()
-        .map(|p| start + p)
+    // LLVM can auto-vectorize this loop with SIMD instructions
+    // The range check pattern is well-recognized by the optimizer
+    bytes[start..]
+        .iter()
+        .position(|&b| b.wrapping_sub(b'0') <= 9)
+        .map(|pos| start + pos)
 }
 
 /// Find a run of consecutive digits [0-9]+ starting at or after `start`
