@@ -2217,7 +2217,7 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
                 }
             }
 
-            // Regular character
+            // Regular ASCII character
             _ if c.is_ascii() => {
                 if case_insensitive && c.is_ascii_alphabetic() {
                     // For case-insensitive, first char could be upper or lower
@@ -2234,9 +2234,17 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
                 literals.push(c as u8);
             }
 
+            // Non-ASCII character - encode as UTF-8 bytes
             _ => {
-                is_pure_literal = false;
-                break; // Non-ASCII
+                if case_insensitive {
+                    // Unicode case-insensitive is complex, bail out
+                    is_pure_literal = false;
+                    break;
+                }
+                // Push UTF-8 bytes for this character
+                let mut buf = [0u8; 4];
+                let encoded = c.encode_utf8(&mut buf);
+                literals.extend_from_slice(encoded.as_bytes());
             }
         }
     }
@@ -3307,6 +3315,28 @@ mod tests {
                 assert_eq!(finder.needle(), b"x");
             }
             _ => panic!("Expected PureLiteral for single char, got {:?}", strategy),
+        }
+    }
+
+    #[test]
+    fn test_strategy_utf8_literal() {
+        // UTF-8 pure literal (Russian "Sherlock Holmes")
+        let strategy = analyze_pattern("Шерлок Холмс", Flags::empty());
+        match strategy {
+            SearchStrategy::PureLiteral(finder) => {
+                // UTF-8 encoding of "Шерлок Холмс"
+                assert_eq!(finder.needle(), "Шерлок Холмс".as_bytes());
+            }
+            _ => panic!("Russian text should be PureLiteral, got {:?}", strategy),
+        }
+
+        // Chinese text
+        let strategy = analyze_pattern("福尔摩斯", Flags::empty());
+        match strategy {
+            SearchStrategy::PureLiteral(finder) => {
+                assert_eq!(finder.needle(), "福尔摩斯".as_bytes());
+            }
+            _ => panic!("Chinese text should be PureLiteral, got {:?}", strategy),
         }
     }
 

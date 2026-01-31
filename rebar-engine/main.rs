@@ -3,7 +3,7 @@ use std::io::Write;
 use {
     anyhow::Context,
     lexopt::{Arg, ValueExt},
-    quickjs_regex::Regex,
+    quickjs_regex::{Flags, Regex},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -241,5 +241,12 @@ fn model_grep_captures(
 
 fn compile(b: &klv::Benchmark) -> anyhow::Result<Regex> {
     let pattern = b.regex.one()?;
-    Ok(Regex::new(&pattern)?)
+    let mut flags = Flags::empty();
+    if b.regex.case_insensitive {
+        flags.insert(Flags::IGNORE_CASE);
+    }
+    if b.regex.unicode {
+        flags.insert(Flags::UNICODE);
+    }
+    Ok(Regex::with_flags(&pattern, flags)?)
 }
