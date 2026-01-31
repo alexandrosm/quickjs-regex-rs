@@ -1551,14 +1551,8 @@ fn detect_pure_pattern(pattern: &str) -> Option<SearchStrategy> {
         return Some(SearchStrategy::PureCapitalWord);
     }
 
-    // Check for [a-z]+suffix patterns (e.g., [a-z]+ing)
-    if pattern.starts_with("[a-z]+") && pattern.len() > 6 {
-        let suffix = &pattern[6..];
-        // Verify suffix is pure ASCII lowercase literal
-        if suffix.bytes().all(|b| b.is_ascii_lowercase()) {
-            return Some(SearchStrategy::PureLowerSuffix(suffix.as_bytes().to_vec()));
-        }
-    }
+    // NOTE: [a-z]+suffix pattern optimization was removed due to over-matching bug
+    // The pattern `[a-z]+ing` is handled by the interpreter with SuffixLiteral strategy
 
     None
 }
