@@ -1067,11 +1067,7 @@ impl Regex {
         // Use specialized iterator for patterns we can handle super fast
         match &self.strategy {
             SearchStrategy::PureLiteral(literal) => {
-                MatchIterator::Literal(LiteralMatches {
-                    literal: literal.as_slice(),
-                    text,
-                    pos: 0,
-                })
+                MatchIterator::Literal(LiteralMatches::new(literal.as_slice(), text))
             }
             SearchStrategy::AlternationLiterals { literals, ac } => {
                 MatchIterator::Alternation(AlternationMatches {
@@ -1314,31 +1310,32 @@ impl<'r, 't> Iterator for MatchIterator<'r, 't> {
     }
 }
 
-/// Fast iterator for pure literal patterns using memmem
+/// Fast iterator for pure literal patterns using memmem::find_iter for efficiency
+/// FindIter<'h, 'n> where 'h = haystack (text), 'n = needle (literal)
 pub struct LiteralMatches<'r, 't> {
-    literal: &'r [u8],
-    text: &'t str,
-    pos: usize,
+    inner: memmem::FindIter<'t, 'r>,
+    literal_len: usize,
+}
+
+impl<'r, 't> LiteralMatches<'r, 't> {
+    /// Create a new literal match iterator
+    fn new(literal: &'r [u8], text: &'t str) -> Self {
+        Self {
+            inner: memmem::find_iter(text.as_bytes(), literal),
+            literal_len: literal.len(),
+        }
+    }
 }
 
 impl<'r, 't> Iterator for LiteralMatches<'r, 't> {
     type Item = Match;
 
+    #[inline]
     fn next(&mut self) -> Option<Match> {
-        if self.pos >= self.text.len() {
-            return None;
-        }
-
-        let bytes = self.text.as_bytes();
-        if let Some(found) = memmem::find(&bytes[self.pos..], self.literal) {
-            let start = self.pos + found;
-            let end = start + self.literal.len();
-            self.pos = end; // Non-overlapping
-            Some(Match { start, end })
-        } else {
-            self.pos = self.text.len(); // No more matches
-            None
-        }
+        self.inner.next().map(|start| Match {
+            start,
+            end: start + self.literal_len,
+        })
     }
 }
 
