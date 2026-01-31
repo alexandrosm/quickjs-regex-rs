@@ -41,3 +41,13 @@ fn test_lower_suffix_no_match() {
     let matches: Vec<_> = re.find_iter(text).collect();
     assert_eq!(matches.len(), 0, "Expected 0 matches, got {}", matches.len());
 }
+
+#[test]
+fn test_lower_suffix_winged() {
+    // "winged" should match "wing" (rightmost "ing" with at least 1 char before)
+    let re = Regex::new("[a-z]+ing").unwrap();
+    let text = "the winged horse";
+    let matches: Vec<_> = re.find_iter(text).collect();
+    assert_eq!(matches.len(), 1, "Expected 1 match, got {}", matches.len());
+    assert_eq!(&text[matches[0].start..matches[0].end], "wing");
+}

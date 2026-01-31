@@ -2497,16 +2497,20 @@ fn find_capital_word(bytes: &[u8], start: usize) -> Option<Match> {
 /// Strategy: search for the suffix, then extend backwards to find lowercase letters
 /// Returns the match directly - NO INTERPRETER NEEDED!
 ///
-/// Algorithm: Find lowercase runs and check if they END with the suffix.
+/// Algorithm: Find lowercase runs and locate the RIGHTMOST occurrence of the suffix.
 /// This matches regex semantics of [a-z]+suffix (greedy).
 ///
 /// Example: "singing" with suffix "ing"
 /// - Lowercase run: "singing" (positions 0-7)
-/// - Ends with "ing"? Yes
-/// - Match: "singing"
+/// - Rightmost "ing": position 4-7
+/// - At least 1 char before? Yes ("sing")
+/// - Match: "singing" (0-7)
 ///
-/// This is different from finding "ing" and extending backwards,
-/// which would incorrectly match "sing" instead of "singing".
+/// Example: "winged" with suffix "ing"
+/// - Lowercase run: "winged" (positions 0-6)
+/// - Rightmost "ing": position 1-4
+/// - At least 1 char before? Yes ("w")
+/// - Match: "wing" (0-4)
 #[inline]
 fn find_lower_suffix(bytes: &[u8], start: usize, suffix: &[u8]) -> Option<Match> {
     let suffix_len = suffix.len();
@@ -2529,14 +2533,27 @@ fn find_lower_suffix(bytes: &[u8], start: usize, suffix: &[u8]) -> Option<Match>
         let run_end = pos;
         let run_len = run_end - run_start;
 
-        // Check if run ends with the suffix AND has at least one char before suffix
-        if run_len > suffix_len {
-            let suffix_start = run_end - suffix_len;
-            if &bytes[suffix_start..run_end] == suffix {
-                // Match! The entire run is the match
-                return Some(Match { start: run_start, end: run_end });
-            }
+        // Need at least suffix_len + 1 characters for a match
+        if run_len <= suffix_len {
+            continue;
         }
+
+        // Search for RIGHTMOST occurrence of suffix in this run
+        // The rightmost position where suffix can start is (run_end - suffix_len)
+        // We need at least 1 char before the suffix, so search from (run_end - suffix_len) down to (run_start + 1)
+
+        // Start checking from the rightmost possible position
+        let mut check_pos = run_end - suffix_len;
+        while check_pos > run_start {
+            if &bytes[check_pos..check_pos + suffix_len] == suffix {
+                // Found rightmost suffix at position check_pos
+                // Match is from run_start to check_pos + suffix_len
+                return Some(Match { start: run_start, end: check_pos + suffix_len });
+            }
+            check_pos -= 1;
+        }
+        // Note: we don't check check_pos == run_start because that would mean
+        // 0 chars before suffix, which doesn't satisfy [a-z]+ (needs 1+)
     }
 
     None
