@@ -2181,19 +2181,66 @@ fn find_whitespace(bytes: &[u8]) -> Option<usize> {
 /// Returns the match directly - NO INTERPRETER NEEDED!
 #[inline]
 fn find_digit_run(bytes: &[u8], start: usize) -> Option<Match> {
-    let slice = &bytes[start..];
+    let len = bytes.len();
+    let mut pos = start;
 
-    // Find the first digit
-    let first = DIGIT_BITMAP.find_in_slice(slice)?;
-    let abs_start = start + first;
+    // Find first digit using explicit range check (LLVM can vectorize this)
+    // Process 8 bytes at a time for better instruction-level parallelism
+    while pos + 8 <= len {
+        // Check 8 bytes, looking for any digit
+        let b0 = bytes[pos];
+        let b1 = bytes[pos + 1];
+        let b2 = bytes[pos + 2];
+        let b3 = bytes[pos + 3];
+        let b4 = bytes[pos + 4];
+        let b5 = bytes[pos + 5];
+        let b6 = bytes[pos + 6];
+        let b7 = bytes[pos + 7];
 
-    // Scan forward to find the end of the digit run
-    let mut end = abs_start + 1;
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
+        // Range check: digit if b'0' <= b && b <= b'9'
+        let d0 = b0.wrapping_sub(b'0') <= 9;
+        let d1 = b1.wrapping_sub(b'0') <= 9;
+        let d2 = b2.wrapping_sub(b'0') <= 9;
+        let d3 = b3.wrapping_sub(b'0') <= 9;
+        let d4 = b4.wrapping_sub(b'0') <= 9;
+        let d5 = b5.wrapping_sub(b'0') <= 9;
+        let d6 = b6.wrapping_sub(b'0') <= 9;
+        let d7 = b7.wrapping_sub(b'0') <= 9;
+
+        if d0 | d1 | d2 | d3 | d4 | d5 | d6 | d7 {
+            // Found at least one digit - find which one
+            if d0 { pos += 0; break; }
+            if d1 { pos += 1; break; }
+            if d2 { pos += 2; break; }
+            if d3 { pos += 3; break; }
+            if d4 { pos += 4; break; }
+            if d5 { pos += 5; break; }
+            if d6 { pos += 6; break; }
+            pos += 7;
+            break;
+        }
+        pos += 8;
     }
 
-    Some(Match { start: abs_start, end })
+    // Check remaining bytes
+    while pos < len && bytes[pos].wrapping_sub(b'0') > 9 {
+        pos += 1;
+    }
+
+    if pos >= len {
+        return None;
+    }
+
+    // Found start of digit run at pos
+    let match_start = pos;
+
+    // Find end of digit run
+    pos += 1;
+    while pos < len && bytes[pos].wrapping_sub(b'0') <= 9 {
+        pos += 1;
+    }
+
+    Some(Match { start: match_start, end: pos })
 }
 
 /// Find a run of consecutive lowercase letters [a-z]+ starting at or after `start`
