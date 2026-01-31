@@ -2177,66 +2177,39 @@ fn find_whitespace(bytes: &[u8]) -> Option<usize> {
 // PURE FAST PATHS - Complete pattern matching without interpreter
 // ============================================================================
 
+/// Find the first digit in bytes[start..] using SIMD-accelerated memchr3
+#[inline]
+fn find_first_digit(bytes: &[u8], start: usize) -> Option<usize> {
+    if start >= bytes.len() {
+        return None;
+    }
+    let slice = &bytes[start..];
+
+    // Use memchr3 to search for digits in batches of 3
+    // Each memchr3 call is SIMD-accelerated
+    let pos1 = memchr::memchr3(b'0', b'1', b'2', slice);
+    let pos2 = memchr::memchr3(b'3', b'4', b'5', slice);
+    let pos3 = memchr::memchr3(b'6', b'7', b'8', slice);
+    let pos4 = memchr::memchr(b'9', slice);
+
+    // Find the minimum position among all searches
+    [pos1, pos2, pos3, pos4]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|p| start + p)
+}
+
 /// Find a run of consecutive digits [0-9]+ starting at or after `start`
 /// Returns the match directly - NO INTERPRETER NEEDED!
 #[inline]
 fn find_digit_run(bytes: &[u8], start: usize) -> Option<Match> {
-    let len = bytes.len();
-    let mut pos = start;
-
-    // Find first digit using explicit range check (LLVM can vectorize this)
-    // Process 8 bytes at a time for better instruction-level parallelism
-    while pos + 8 <= len {
-        // Check 8 bytes, looking for any digit
-        let b0 = bytes[pos];
-        let b1 = bytes[pos + 1];
-        let b2 = bytes[pos + 2];
-        let b3 = bytes[pos + 3];
-        let b4 = bytes[pos + 4];
-        let b5 = bytes[pos + 5];
-        let b6 = bytes[pos + 6];
-        let b7 = bytes[pos + 7];
-
-        // Range check: digit if b'0' <= b && b <= b'9'
-        let d0 = b0.wrapping_sub(b'0') <= 9;
-        let d1 = b1.wrapping_sub(b'0') <= 9;
-        let d2 = b2.wrapping_sub(b'0') <= 9;
-        let d3 = b3.wrapping_sub(b'0') <= 9;
-        let d4 = b4.wrapping_sub(b'0') <= 9;
-        let d5 = b5.wrapping_sub(b'0') <= 9;
-        let d6 = b6.wrapping_sub(b'0') <= 9;
-        let d7 = b7.wrapping_sub(b'0') <= 9;
-
-        if d0 | d1 | d2 | d3 | d4 | d5 | d6 | d7 {
-            // Found at least one digit - find which one
-            if d0 { pos += 0; break; }
-            if d1 { pos += 1; break; }
-            if d2 { pos += 2; break; }
-            if d3 { pos += 3; break; }
-            if d4 { pos += 4; break; }
-            if d5 { pos += 5; break; }
-            if d6 { pos += 6; break; }
-            pos += 7;
-            break;
-        }
-        pos += 8;
-    }
-
-    // Check remaining bytes
-    while pos < len && bytes[pos].wrapping_sub(b'0') > 9 {
-        pos += 1;
-    }
-
-    if pos >= len {
-        return None;
-    }
-
-    // Found start of digit run at pos
-    let match_start = pos;
+    // Use SIMD-accelerated search to find first digit
+    let match_start = find_first_digit(bytes, start)?;
 
     // Find end of digit run
-    pos += 1;
-    while pos < len && bytes[pos].wrapping_sub(b'0') <= 9 {
+    let mut pos = match_start + 1;
+    while pos < bytes.len() && bytes[pos].wrapping_sub(b'0') <= 9 {
         pos += 1;
     }
 
