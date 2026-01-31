@@ -1450,11 +1450,78 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
 
     // Convert literals to appropriate strategy
     match literals.len() {
-        0 => SearchStrategy::None,
+        0 => {
+            // No prefix - try to find a suffix literal
+            if let Some(suffix) = extract_suffix_literal(pattern) {
+                if suffix.len() >= 2 {
+                    return SearchStrategy::SuffixLiteral(suffix);
+                }
+            }
+            SearchStrategy::None
+        }
         1 if is_pure_literal => SearchStrategy::PureLiteral(literals),
         1 => SearchStrategy::SingleByte(literals[0]),
         _ if is_pure_literal => SearchStrategy::PureLiteral(literals),
         _ => SearchStrategy::LiteralPrefix(literals),
+    }
+}
+
+/// Extract a literal suffix from the end of a pattern
+/// For example, "[a-z]+ing" -> Some("ing")
+fn extract_suffix_literal(pattern: &str) -> Option<Vec<u8>> {
+    let mut suffix = Vec::new();
+    let mut chars: Vec<char> = pattern.chars().collect();
+
+    // Work backwards from the end
+    while let Some(c) = chars.pop() {
+        match c {
+            // End anchor is OK, we can still have a suffix
+            '$' => continue,
+
+            // Metacharacters - stop here
+            '.' | '*' | '+' | '?' | ']' | ')' | '}' | '|' | '^' => {
+                break;
+            }
+
+            // Escaped character - check what it is
+            _ if !chars.is_empty() && chars.last() == Some(&'\\') => {
+                chars.pop(); // consume the backslash
+                match c {
+                    // These escapes are literal characters
+                    '\\' | '/' | 'n' | 'r' | 't' | '.' | '*' | '+' | '?' |
+                    '[' | ']' | '(' | ')' | '{' | '}' | '|' | '^' | '$' => {
+                        let byte = match c {
+                            'n' => b'\n',
+                            'r' => b'\r',
+                            't' => b'\t',
+                            _ => c as u8,
+                        };
+                        suffix.push(byte);
+                    }
+                    // Character classes - stop
+                    'd' | 'D' | 'w' | 'W' | 's' | 'S' | 'b' | 'B' => {
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+
+            // Regular ASCII character
+            _ if c.is_ascii() => {
+                suffix.push(c as u8);
+            }
+
+            _ => break,
+        }
+    }
+
+    // Reverse since we collected backwards
+    suffix.reverse();
+
+    if suffix.is_empty() {
+        None
+    } else {
+        Some(suffix)
     }
 }
 
