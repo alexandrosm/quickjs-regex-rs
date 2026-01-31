@@ -655,6 +655,13 @@ enum SearchStrategy {
         literals: Vec<Vec<u8>>,
         ac: AhoCorasick,
     },
+    /// Case-insensitive ASCII literal - search using case-folded comparison
+    CaseInsensitiveLiteral {
+        /// The pattern in lowercase for comparison
+        lowercase: Vec<u8>,
+        /// Original pattern length
+        len: usize,
+    },
     /// Pattern ends with a literal suffix - search backwards
     SuffixLiteral(Vec<u8>),
     /// Bitmap-based search for character classes with 4+ bytes
@@ -701,6 +708,9 @@ impl std::fmt::Debug for SearchStrategy {
             SearchStrategy::AlternationLiterals { literals, .. } => {
                 let strs: Vec<_> = literals.iter().map(|l| String::from_utf8_lossy(l).to_string()).collect();
                 write!(f, "AlternationLiterals({:?})", strs)
+            }
+            SearchStrategy::CaseInsensitiveLiteral { lowercase, len } => {
+                write!(f, "CaseInsensitiveLiteral({:?}, len={})", String::from_utf8_lossy(lowercase), len)
             }
             SearchStrategy::SuffixLiteral(lit) => write!(f, "SuffixLiteral({:?})", String::from_utf8_lossy(lit)),
             SearchStrategy::Bitmap(bm) => write!(f, "{:?}", bm),
@@ -845,6 +855,10 @@ impl Regex {
 
             SearchStrategy::AlternationLiterals { literals, ac } => {
                 self.find_with_alternation_literals(text, literals, ac)
+            }
+
+            SearchStrategy::CaseInsensitiveLiteral { lowercase, len } => {
+                self.find_case_insensitive_literal(text, lowercase, *len)
             }
 
             SearchStrategy::SuffixLiteral(suffix) => {
@@ -1188,6 +1202,10 @@ impl Regex {
                 self.find_at_alternation_literals(text, start, literals, ac)
             }
 
+            SearchStrategy::CaseInsensitiveLiteral { lowercase, len } => {
+                self.find_at_case_insensitive_literal(text, start, lowercase, *len)
+            }
+
             SearchStrategy::SuffixLiteral(suffix) => {
                 self.find_at_suffix_literal(text, start, suffix)
             }
@@ -1415,6 +1433,72 @@ impl Regex {
                 end: start + mat.end(),
             }
         })
+    }
+
+    /// Find case-insensitive ASCII literal using fast case-folded comparison
+    #[inline]
+    fn find_case_insensitive_literal(&self, text: &str, lowercase: &[u8], len: usize) -> Option<Match> {
+        self.find_at_case_insensitive_literal(text, 0, lowercase, len)
+    }
+
+    /// Find case-insensitive ASCII literal from a starting position
+    /// Uses optimized byte-by-byte comparison with ASCII case folding
+    #[inline]
+    fn find_at_case_insensitive_literal(&self, text: &str, start: usize, lowercase: &[u8], len: usize) -> Option<Match> {
+        let bytes = text.as_bytes();
+        if bytes.len() < start + len {
+            return None;
+        }
+
+        // Use the first byte (already lowercase) for memchr scanning
+        let first_lower = lowercase[0];
+        let first_upper = first_lower.to_ascii_uppercase();
+
+        let mut pos = start;
+        while pos + len <= bytes.len() {
+            // Find next occurrence of first char (either case)
+            let search_bytes = &bytes[pos..];
+            let next_pos = if first_lower == first_upper {
+                // Non-alphabetic first char
+                memchr(first_lower, search_bytes)
+            } else {
+                memchr2(first_lower, first_upper, search_bytes)
+            };
+
+            match next_pos {
+                Some(offset) => {
+                    let candidate_pos = pos + offset;
+                    if candidate_pos + len > bytes.len() {
+                        return None;
+                    }
+
+                    // Check if the full pattern matches case-insensitively
+                    if self.matches_case_insensitive(&bytes[candidate_pos..candidate_pos + len], lowercase) {
+                        return Some(Match {
+                            start: candidate_pos,
+                            end: candidate_pos + len,
+                        });
+                    }
+                    pos = candidate_pos + 1;
+                }
+                None => return None,
+            }
+        }
+        None
+    }
+
+    /// Check if a byte slice matches a lowercase pattern case-insensitively
+    #[inline(always)]
+    fn matches_case_insensitive(&self, haystack: &[u8], lowercase_pattern: &[u8]) -> bool {
+        if haystack.len() != lowercase_pattern.len() {
+            return false;
+        }
+        for (h, p) in haystack.iter().zip(lowercase_pattern.iter()) {
+            if h.to_ascii_lowercase() != *p {
+                return false;
+            }
+        }
+        true
     }
 
     /// Find suffix literal from a starting position
@@ -2220,18 +2304,12 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
             // Regular ASCII character
             _ if c.is_ascii() => {
                 if case_insensitive && c.is_ascii_alphabetic() {
-                    // For case-insensitive, first char could be upper or lower
+                    // For case-insensitive, accumulate lowercase version
                     is_pure_literal = false;
-                    if literals.is_empty() {
-                        let lower = c.to_ascii_lowercase() as u8;
-                        let upper = c.to_ascii_uppercase() as u8;
-                        if lower != upper {
-                            return SearchStrategy::TwoBytes(lower, upper);
-                        }
-                    }
-                    break;
+                    literals.push(c.to_ascii_lowercase() as u8);
+                } else {
+                    literals.push(c as u8);
                 }
-                literals.push(c as u8);
             }
 
             // Non-ASCII character - encode as UTF-8 bytes
@@ -2249,6 +2327,15 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
         }
     }
 
+    // For case-insensitive full literal patterns, use optimized search
+    if case_insensitive && !is_pure_literal && literals.len() == pattern.len() && literals.len() >= 2 {
+        // The entire pattern is a literal (all chars were pushed)
+        return SearchStrategy::CaseInsensitiveLiteral {
+            lowercase: literals,
+            len: pattern.len(),
+        };
+    }
+
     // Convert literals to appropriate strategy
     match literals.len() {
         0 => {
@@ -2261,6 +2348,16 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
             SearchStrategy::None
         }
         1 if is_pure_literal => SearchStrategy::PureLiteral(OwnedFinder::new(literals)),
+        1 if case_insensitive => {
+            // Single byte prefix for case-insensitive - need both cases
+            let lower = literals[0].to_ascii_lowercase();
+            let upper = literals[0].to_ascii_uppercase();
+            if lower != upper {
+                SearchStrategy::TwoBytes(lower, upper)
+            } else {
+                SearchStrategy::SingleByte(literals[0])
+            }
+        }
         1 => SearchStrategy::SingleByte(literals[0]),
         _ if is_pure_literal => SearchStrategy::PureLiteral(OwnedFinder::new(literals)),
         _ => SearchStrategy::LiteralPrefix(OwnedFinder::new(literals)),
@@ -2551,7 +2648,7 @@ fn analyze_alternation(pattern: &str, case_insensitive: bool) -> SearchStrategy 
         1 => SearchStrategy::SingleByte(first_bytes[0]),
         2 => SearchStrategy::TwoBytes(first_bytes[0], first_bytes[1]),
         3 => SearchStrategy::ThreeBytes(first_bytes[0], first_bytes[1], first_bytes[2]),
-        _ => SearchStrategy::None,
+        _ => SearchStrategy::Bitmap(ByteBitmap::from_bytes(&first_bytes)),
     }
 }
 
@@ -3504,9 +3601,9 @@ mod tests {
             _ => panic!("Expected AlternationLiterals, got {:?}", strategy),
         }
 
-        // Case-insensitive falls back to TwoBytes
+        // Case-insensitive alternation uses Bitmap for 4+ first bytes (c, C, d, D)
         let strategy = analyze_pattern("cat|dog", Flags::from_bits(Flags::IGNORE_CASE));
-        assert!(matches!(strategy, SearchStrategy::TwoBytes(_, _)));
+        assert!(matches!(strategy, SearchStrategy::Bitmap(_)));
     }
 
     // ========================================================================
