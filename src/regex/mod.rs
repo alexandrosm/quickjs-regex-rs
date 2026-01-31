@@ -2309,27 +2309,30 @@ fn find_alnum_run(bytes: &[u8], start: usize) -> Option<Match> {
     Some(Match { start: match_start, end: match_end })
 }
 
+/// Check if byte is a word character [a-zA-Z0-9_]
+#[inline(always)]
+fn is_word_char(b: u8) -> bool {
+    is_alnum(b) || b == b'_'
+}
+
 /// Find a run of consecutive word chars [a-zA-Z0-9_]+ or \w+ starting at or after `start`
+/// Uses LLVM-vectorizable patterns
 #[inline]
 fn find_word_run(bytes: &[u8], start: usize) -> Option<Match> {
-    let slice = &bytes[start..];
+    // Find first word char
+    let match_start = bytes[start..]
+        .iter()
+        .position(|&b| is_word_char(b))
+        .map(|p| start + p)?;
 
-    // Find the first word char using bitmap
-    let first = WORD_CHAR_BITMAP.find_in_slice(slice)?;
-    let abs_start = start + first;
+    // Find end of run
+    let match_end = bytes[match_start..]
+        .iter()
+        .position(|&b| !is_word_char(b))
+        .map(|p| match_start + p)
+        .unwrap_or(bytes.len());
 
-    // Scan forward to find the end of the word run
-    let mut end = abs_start + 1;
-    while end < bytes.len() {
-        let b = bytes[end];
-        if b.is_ascii_alphanumeric() || b == b'_' {
-            end += 1;
-        } else {
-            break;
-        }
-    }
-
-    Some(Match { start: abs_start, end })
+    Some(Match { start: match_start, end: match_end })
 }
 
 /// Fast literal search using memchr + verification with rare byte heuristic
