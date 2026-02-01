@@ -20,6 +20,7 @@ path = "../../shared/regexredux"
 path = "../../shared/timer"
 
 [profile.release]
-debug = true
+debug = false
 codegen-units = 1
-lto = "fat"
+lto = true
+opt-level = 3
