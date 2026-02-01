@@ -88,3 +88,41 @@ fn test_utf8_no_panic() {
         let _ = re.find_iter(text).count();
     }
 }
+
+/// Test that \d matches ASCII digits only (per ECMAScript spec)
+#[test]
+fn test_digit_ascii_only() {
+    // ASCII digits
+    let ascii_text = "Test 123 numbers";
+    let re = Regex::new(r"\d+").unwrap();
+    
+    let result = re.find(ascii_text);
+    assert!(result.is_some());
+    let m = result.unwrap();
+    assert_eq!(&ascii_text[m.start..m.end], "123");
+    
+    // Unicode digits (should NOT match per ECMAScript)
+    let arabic_digits = "Test ١٢٣ numbers"; // Arabic-Indic digits
+    let result = re.find(arabic_digits);
+    // \d should only match ASCII 0-9, not Unicode digits
+    assert!(result.is_none() || &arabic_digits[result.as_ref().unwrap().start..result.as_ref().unwrap().end] != "١٢٣",
+        r"\d should not match Arabic-Indic digits per ECMAScript spec");
+}
+
+/// Test date pattern with ASCII digits
+#[test]
+fn test_date_pattern() {
+    let text = "Date: 2024-01-15, Time: 10:30:00";
+    
+    // Date pattern
+    let re = Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap();
+    let result = re.find(text);
+    assert!(result.is_some());
+    let m = result.unwrap();
+    assert_eq!(&text[m.start..m.end], "2024-01-15");
+    
+    // Count all digit sequences
+    let re_digits = Regex::new(r"\d+").unwrap();
+    let count = re_digits.find_iter(text).count();
+    assert_eq!(count, 6, "Should find 6 digit sequences: 2024, 01, 15, 10, 30, 00");
+}
