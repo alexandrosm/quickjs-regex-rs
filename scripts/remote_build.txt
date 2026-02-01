@@ -1,0 +1,5 @@
+export PATH=/root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH
+cd /root/quickjs-regex-rs
+RUSTFLAGS="-C target-cpu=haswell" cargo build --release --manifest-path rebar-engine/Cargo.toml
+cp rebar-engine/target/release/main /root/rebar/engines/quickjs/bin/
+echo "Build complete"

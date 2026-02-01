@@ -353,6 +353,7 @@ dependencies = [
  "criterion",
  "libc",
  "memchr",
+ "regex",
  "regress",
  "serde",
  "serde_json",
