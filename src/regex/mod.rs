@@ -34,7 +34,7 @@ pub use error::{Error, Result, ExecResult};
 use std::ffi::CStr;
 use std::ptr;
 
-use aho_corasick::AhoCorasick;
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use memchr::{memchr, memchr2, memchr3, memmem};
 
 // ============================================================================
@@ -2172,6 +2172,33 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
         }
     }
 
+    let case_insensitive = flags.is_ignore_case();
+
+    // Check if entire pattern is wrapped in a capturing group: (alt1|alt2|...)
+    // This is common for patterns like "(january|february|...)"
+    if pattern.starts_with('(') && pattern.ends_with(')') && !pattern.starts_with("(?") {
+        // Check if the parentheses are balanced (not nested groups)
+        let inner = &pattern[1..pattern.len()-1];
+        let mut depth = 0;
+        let mut has_alternation = false;
+        for c in inner.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                '|' if depth == 0 => has_alternation = true,
+                _ => {}
+            }
+            if depth < 0 { break; } // Unbalanced
+        }
+        // If it's a simple group with top-level alternation, analyze the inner pattern
+        if depth == 0 && has_alternation {
+            let inner_strategy = analyze_alternation(inner, case_insensitive);
+            if !matches!(inner_strategy, SearchStrategy::None) {
+                return inner_strategy;
+            }
+        }
+    }
+
     let mut chars = pattern.chars().peekable();
 
     // Check for start anchor
@@ -2181,9 +2208,6 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
         let anchored_literal = analyze_anchored_remainder(&mut chars, flags);
         return anchored_literal;
     }
-
-    // Case-insensitive patterns are tricky - handle alternation of cases
-    let case_insensitive = flags.is_ignore_case();
 
     // Try to extract leading literal(s) or character class
     let mut literals = Vec::new();
@@ -2567,13 +2591,18 @@ fn analyze_alternation(pattern: &str, case_insensitive: bool) -> SearchStrategy 
     // First, try to extract all alternatives as pure literals
     let alternatives: Vec<&str> = split_top_level_alternation(pattern);
 
-    if !case_insensitive && alternatives.len() >= 2 {
-        // Check if all alternatives are pure literals
+    if alternatives.len() >= 2 {
+        // Check if all alternatives are pure literals (ASCII only for case-insensitive)
         let mut all_pure = true;
         let mut literals: Vec<Vec<u8>> = Vec::new();
 
         for alt in &alternatives {
             if let Some(lit) = extract_pure_literal(alt) {
+                // For case-insensitive, only use AC if all literals are ASCII
+                if case_insensitive && !lit.iter().all(|&b| b.is_ascii()) {
+                    all_pure = false;
+                    break;
+                }
                 literals.push(lit);
             } else {
                 all_pure = false;
@@ -2583,7 +2612,11 @@ fn analyze_alternation(pattern: &str, case_insensitive: bool) -> SearchStrategy 
 
         if all_pure && !literals.is_empty() {
             // Use Aho-Corasick for multi-pattern matching - BLAZING FAST!
-            let ac = AhoCorasick::new(&literals).unwrap();
+            // Enable case-insensitive matching if needed
+            let ac = AhoCorasickBuilder::new()
+                .ascii_case_insensitive(case_insensitive)
+                .build(&literals)
+                .unwrap();
             return SearchStrategy::AlternationLiterals { literals, ac };
         }
     }
@@ -3605,9 +3638,16 @@ mod tests {
             _ => panic!("Expected AlternationLiterals, got {:?}", strategy),
         }
 
-        // Case-insensitive alternation uses Bitmap for 4+ first bytes (c, C, d, D)
+        // Case-insensitive alternation now uses Aho-Corasick with ascii_case_insensitive
         let strategy = analyze_pattern("cat|dog", Flags::from_bits(Flags::IGNORE_CASE));
-        assert!(matches!(strategy, SearchStrategy::Bitmap(_)));
+        match strategy {
+            SearchStrategy::AlternationLiterals { literals, .. } => {
+                assert_eq!(literals.len(), 2);
+                assert_eq!(literals[0], b"cat");
+                assert_eq!(literals[1], b"dog");
+            }
+            _ => panic!("Expected AlternationLiterals for case-insensitive, got {:?}", strategy),
+        }
     }
 
     // ========================================================================
