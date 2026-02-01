@@ -2193,9 +2193,9 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
         // If it's a simple group with top-level alternation, analyze the inner pattern
         if depth == 0 && has_alternation {
             let inner_strategy = analyze_alternation(inner, case_insensitive);
-            if !matches!(inner_strategy, SearchStrategy::None) {
-                return inner_strategy;
-            }
+            // Always return - even if None, don't fall through to extract a partial prefix
+            // from just one branch of the alternation
+            return inner_strategy;
         }
     }
 
