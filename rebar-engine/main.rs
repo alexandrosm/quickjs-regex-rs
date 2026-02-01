@@ -36,10 +36,12 @@ fn main() -> anyhow::Result<()> {
                     "c-engine" => Mode::CEngine,
                     _ => anyhow::bail!("unknown mode: {}", val),
                 };
+                eprintln!("DEBUG: mode set to {:?}", mode);
             }
             _ => return Err(arg.unexpected().into()),
         }
     }
+    eprintln!("DEBUG: final mode is {:?}", mode);
     if version {
         writeln!(std::io::stdout(), "{}", env!("CARGO_PKG_VERSION"))?;
         return Ok(());
@@ -64,7 +66,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+// Track whether we've logged timing info
+static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn find_all(re: &Regex, haystack: &str, mode: Mode) -> usize {
+    let start_time = std::time::Instant::now();
     let mut count = 0;
     let mut pos = 0;
     while pos < haystack.len() {
@@ -84,6 +90,11 @@ fn find_all(re: &Regex, haystack: &str, mode: Mode) -> usize {
             }
             None => break,
         }
+    }
+    // Log timing for first run only
+    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("DEBUG find_all: mode={:?} count={} elapsed={:?} haystack_len={}",
+            mode, count, start_time.elapsed(), haystack.len());
     }
     count
 }
