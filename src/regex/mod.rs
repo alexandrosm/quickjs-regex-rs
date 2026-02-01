@@ -1626,6 +1626,27 @@ impl Regex {
         format!("{:?}", self.strategy)
     }
 
+    /// Count all non-overlapping matches efficiently.
+    ///
+    /// This is optimized for counting and uses native Aho-Corasick iteration
+    /// for alternation patterns, which is faster than repeated find_at calls.
+    pub fn count_matches(&self, text: &str) -> usize {
+        match &self.strategy {
+            SearchStrategy::AlternationLiterals { ac, .. } => {
+                // Use AC's native find_iter which maintains state efficiently
+                ac.find_iter(text.as_bytes()).count()
+            }
+            SearchStrategy::PureLiteral(finder) => {
+                // Use memmem's native find_iter
+                finder.finder.find_iter(text.as_bytes()).count()
+            }
+            _ => {
+                // Fall back to find_iter for other strategies
+                self.find_iter(text).count()
+            }
+        }
+    }
+
     /// Find all non-overlapping matches.
     ///
     /// # Example

@@ -103,7 +103,12 @@ fn model_count(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
-    timer::run(b, || Ok(find_all(re, haystack, mode)))
+    // Use count_matches for PureRust mode - it uses native Aho-Corasick iteration
+    // which is faster than repeated find_at calls (maintains automaton state)
+    match mode {
+        Mode::PureRust => timer::run(b, || Ok(re.count_matches(haystack))),
+        _ => timer::run(b, || Ok(find_all(re, haystack, mode))),
+    }
 }
 
 fn model_count_spans(
