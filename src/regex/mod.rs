@@ -813,7 +813,11 @@ impl Regex {
 
         // For short inputs, just use the engine directly
         if len < OPTIMIZATION_THRESHOLD {
-            return self.try_match_at(text, 0).or_else(|| self.find_at_linear(text, 1));
+            return self.try_match_at(text, 0).or_else(|| {
+                // Advance by first char's UTF-8 length (not 1 byte!)
+                let first_char_len = text.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                self.find_at_linear(text, first_char_len)
+            });
         }
 
         // Use the pre-computed search strategy
