@@ -2364,6 +2364,13 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
         };
     }
 
+    // IMPORTANT: If we only parsed a partial prefix AND the pattern contains alternation,
+    // the prefix may only represent one branch. Using it for scanning would miss other branches.
+    // Fall back to None (linear scan) in this case for correctness.
+    if !is_pure_literal && pattern_has_alternation(pattern) {
+        return SearchStrategy::None;
+    }
+
     // Convert literals to appropriate strategy
     match literals.len() {
         0 => {
@@ -2388,6 +2395,19 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
         }
         1 => SearchStrategy::SingleByte(literals[0]),
         _ if is_pure_literal => SearchStrategy::PureLiteral(OwnedFinder::new(literals)),
+        _ if case_insensitive => {
+            // For case-insensitive with multi-byte prefix, we can't use memmem directly
+            // because the prefix is lowercased but the text may have mixed case.
+            // Use TwoBytes strategy with both cases of the first letter instead.
+            let first = literals[0];
+            let lower = first.to_ascii_lowercase();
+            let upper = first.to_ascii_uppercase();
+            if lower != upper {
+                SearchStrategy::TwoBytes(lower, upper)
+            } else {
+                SearchStrategy::SingleByte(first)
+            }
+        }
         _ => SearchStrategy::LiteralPrefix(OwnedFinder::new(literals)),
     }
 }
@@ -2582,6 +2602,23 @@ fn analyze_char_class(chars: &mut std::iter::Peekable<std::str::Chars>, _case_in
         // Use bitmap for 4+ bytes - much faster than falling back to None!
         _ => SearchStrategy::Bitmap(ByteBitmap::from_bytes(&bytes)),
     }
+}
+
+/// Check if a pattern contains top-level alternation (accounting for nested groups)
+/// This is used to detect patterns like ((a)|(b)) where the prefix from one branch
+/// shouldn't be used to scan since it would miss the other branches.
+fn pattern_has_alternation(pattern: &str) -> bool {
+    let mut depth = 0;
+    for c in pattern.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => { if depth > 0 { depth -= 1; } }
+            '|' if depth <= 1 => return true, // Alternation at top level or one level deep
+            '\\' => continue, // Skip next char (escape)
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Analyze alternation like foo|bar|baz
