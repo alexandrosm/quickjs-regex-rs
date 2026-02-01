@@ -1,14 +1,14 @@
 use std::time::Instant;
 
 fn main() {
-    // Read the actual sherlock.txt from rebar
-    let text = match std::fs::read_to_string("/root/rebar/benchmarks/haystacks/sherlock.txt") {
+    // Read the actual haystack from rebar (the opensubtitles file used in benchmarks)
+    let text = match std::fs::read_to_string("/root/rebar/benchmarks/haystacks/opensubtitles/en-sampled.txt") {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Could not read sherlock.txt: {}", e);
-            eprintln!("Trying local path...");
-            std::fs::read_to_string("benchmarks/haystacks/sherlock.txt")
-                .expect("Could not read sherlock.txt from any path")
+            eprintln!("Could not read opensubtitles/en-sampled.txt: {}", e);
+            eprintln!("Trying sherlock.txt as fallback...");
+            std::fs::read_to_string("/root/rebar/benchmarks/haystacks/sherlock.txt")
+                .unwrap_or_else(|_| panic!("Could not read haystack"))
         }
     };
 
