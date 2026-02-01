@@ -15,35 +15,9 @@ memchr = "2"
 aho-corasick = "1"
 
 [dev-dependencies]
-criterion = "0.5"
-regress = "0.10"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-[[bench]]
-name = "comparison"
-harness = false
-
-[[bench]]
-name = "profile_simple"
-harness = false
-
-[[bench]]
-name = "ab_test"
-harness = false
-
-[[bench]]
-name = "engine_comparison"
-harness = false
-
-[[bench]]
-name = "full_comparison"
-harness = false
-
-[[bench]]
-name = "interleaved_comparison"
-harness = false
 
 [profile.release]
 lto = true

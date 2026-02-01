@@ -759,13 +759,20 @@ impl Regex {
 
     /// Compile a new regular expression with flags
     pub fn with_flags(pattern: &str, flags: Flags) -> Result<Self> {
+        // Extract inline flags from pattern (e.g., (?i), (?m), (?s), etc.)
+        let (processed_pattern, mut extracted_flags) = extract_inline_flags(pattern);
+
+        // Merge provided flags with extracted inline flags
+        let mut final_flags = flags;
+        final_flags.insert(extracted_flags.bits());
+
         let mut error_msg = [0i8; 128];
         let mut bytecode_len: i32 = 0;
 
         // Create a null-terminated copy of the pattern.
         // The lre_compile function expects the buffer to be null-terminated
         // for proper end-of-pattern detection.
-        let mut pattern_buf: Vec<u8> = pattern.as_bytes().to_vec();
+        let mut pattern_buf: Vec<u8> = processed_pattern.as_bytes().to_vec();
         pattern_buf.push(0);
 
         let bytecode = engine::lre_compile(
@@ -773,8 +780,8 @@ impl Regex {
             error_msg.as_mut_ptr(),
             error_msg.len() as i32,
             pattern_buf.as_ptr() as *const i8,
-            pattern.len(),
-            flags.bits() as i32,
+            processed_pattern.len(),
+            final_flags.bits() as i32,
             ptr::null_mut(),
         );
 
@@ -790,12 +797,12 @@ impl Regex {
         }
 
         // Analyze pattern to determine optimal search strategy
-        let strategy = analyze_pattern(pattern, flags);
+        let strategy = analyze_pattern(&processed_pattern, final_flags);
 
         Ok(Regex {
             bytecode,
             pattern: pattern.to_string(),
-            flags,
+            flags: final_flags,
             strategy,
         })
     }
@@ -2187,6 +2194,86 @@ fn detect_pure_pattern(pattern: &str) -> Option<SearchStrategy> {
     }
 
     None
+}
+
+/// Extract inline flags from a pattern like (?i)pattern or (?ims)pattern
+///
+/// Supports Perl-style inline flags at the start of the pattern:
+/// - (?i) - case insensitive
+/// - (?m) - multiline
+/// - (?s) - dot matches newline
+/// - (?u) - unicode
+/// - (?imsu) - multiple flags
+///
+/// Returns the pattern without the inline flag prefix and the extracted flags.
+fn extract_inline_flags(pattern: &str) -> (String, Flags) {
+    let mut flags = Flags::empty();
+    let mut pos = 0;
+    let bytes = pattern.as_bytes();
+
+    // Keep extracting inline flags from the start of the pattern
+    while pos + 2 < bytes.len() && bytes[pos] == b'(' && bytes[pos + 1] == b'?' {
+        let mut i = pos + 2; // Skip "(?"
+        let mut local_flags = Flags::empty();
+        let mut has_flags = false;
+        let mut found_end = false;
+
+        // Parse flag characters
+        while i < bytes.len() {
+            match bytes[i] {
+                b'i' => {
+                    local_flags.insert(Flags::IGNORE_CASE);
+                    has_flags = true;
+                    i += 1;
+                }
+                b'm' => {
+                    local_flags.insert(Flags::MULTILINE);
+                    has_flags = true;
+                    i += 1;
+                }
+                b's' => {
+                    local_flags.insert(Flags::DOT_ALL);
+                    has_flags = true;
+                    i += 1;
+                }
+                b'u' => {
+                    local_flags.insert(Flags::UNICODE);
+                    has_flags = true;
+                    i += 1;
+                }
+                b'x' => {
+                    // Extended mode - just consume it (not supported but don't error)
+                    has_flags = true;
+                    i += 1;
+                }
+                b')' => {
+                    // End of flag-only group like (?i)
+                    if has_flags {
+                        found_end = true;
+                        i += 1; // Move past ')'
+                    }
+                    break;
+                }
+                _ => {
+                    // Not a flag character - this is a different kind of group
+                    // e.g., (?:...), (?=...), (?!...), etc.
+                    break;
+                }
+            }
+        }
+
+        if found_end {
+            // Successfully parsed a flag group, merge flags and advance position
+            flags.insert(local_flags.bits());
+            pos = i;
+        } else {
+            // Not a pure flag group, stop parsing
+            break;
+        }
+    }
+
+    // Return the remaining pattern after all flag groups
+    (pattern[pos..].to_string(), flags)
 }
 
 /// Analyze a pattern to determine the best search strategy.
