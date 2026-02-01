@@ -268,7 +268,8 @@ fn compile(b: &klv::Benchmark) -> anyhow::Result<Regex> {
         flags.insert(Flags::UNICODE);
     }
     let re = Regex::with_flags(&pattern, flags)?;
-    // Debug: print strategy to stderr
-    eprintln!("DEBUG: pattern='{}' strategy={}", pattern, re.strategy_name());
+    // Debug: print pattern, flags, and strategy
+    eprintln!("DEBUG compile: pattern='{}' ci={} unicode={} flags={:?} strategy={}",
+        pattern, b.regex.case_insensitive, b.regex.unicode, flags, re.strategy_name());
     Ok(re)
 }
