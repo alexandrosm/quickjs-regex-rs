@@ -14,6 +14,9 @@ enum Mode {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Debug: log that we started
+    let _ = std::fs::write("/root/quickjs_started.txt", format!("main() started at {:?}\n", std::time::Instant::now()));
+
     let mut p = lexopt::Parser::from_env();
     let (mut quiet, mut version) = (false, false);
     let mut mode = Mode::Hybrid;
