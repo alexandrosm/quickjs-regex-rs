@@ -248,5 +248,8 @@ fn compile(b: &klv::Benchmark) -> anyhow::Result<Regex> {
     if b.regex.unicode {
         flags.insert(Flags::UNICODE);
     }
-    Ok(Regex::with_flags(&pattern, flags)?)
+    let re = Regex::with_flags(&pattern, flags)?;
+    // Debug: print strategy to stderr
+    eprintln!("DEBUG: pattern='{}' strategy={}", pattern, re.strategy_name());
+    Ok(re)
 }
