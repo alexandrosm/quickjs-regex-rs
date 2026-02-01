@@ -2604,17 +2604,19 @@ fn analyze_char_class(chars: &mut std::iter::Peekable<std::str::Chars>, _case_in
     }
 }
 
-/// Check if a pattern contains top-level alternation (accounting for nested groups)
-/// This is used to detect patterns like ((a)|(b)) where the prefix from one branch
-/// shouldn't be used to scan since it would miss the other branches.
+/// Check if a pattern contains alternation at any depth (outside character classes)
+/// This is used to detect patterns where a prefix from one branch shouldn't be
+/// used to scan since it would miss matches from other branches.
 fn pattern_has_alternation(pattern: &str) -> bool {
-    let mut depth = 0;
-    for c in pattern.chars() {
+    let mut in_char_class = false;
+    let mut chars = pattern.chars().peekable();
+
+    while let Some(c) = chars.next() {
         match c {
-            '(' => depth += 1,
-            ')' => { if depth > 0 { depth -= 1; } }
-            '|' if depth <= 1 => return true, // Alternation at top level or one level deep
-            '\\' => continue, // Skip next char (escape)
+            '\\' => { chars.next(); } // Skip escaped char
+            '[' if !in_char_class => in_char_class = true,
+            ']' if in_char_class => in_char_class = false,
+            '|' if !in_char_class => return true, // Alternation at any depth
             _ => {}
         }
     }
