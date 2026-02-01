@@ -14,9 +14,6 @@ enum Mode {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Debug: log that we started
-    let _ = std::fs::write("/root/quickjs_started.txt", format!("main() started at {:?}\n", std::time::Instant::now()));
-
     let mut p = lexopt::Parser::from_env();
     let (mut quiet, mut version) = (false, false);
     let mut mode = Mode::Hybrid;
@@ -39,12 +36,10 @@ fn main() -> anyhow::Result<()> {
                     "c-engine" => Mode::CEngine,
                     _ => anyhow::bail!("unknown mode: {}", val),
                 };
-                eprintln!("DEBUG: mode set to {:?}", mode);
             }
             _ => return Err(arg.unexpected().into()),
         }
     }
-    eprintln!("DEBUG: final mode is {:?}", mode);
     if version {
         writeln!(std::io::stdout(), "{}", env!("CARGO_PKG_VERSION"))?;
         return Ok(());
@@ -69,11 +64,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Track whether we've logged timing info
-static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 fn find_all(re: &Regex, haystack: &str, mode: Mode) -> usize {
-    let start_time = std::time::Instant::now();
     let mut count = 0;
     let mut pos = 0;
     while pos < haystack.len() {
@@ -93,16 +84,6 @@ fn find_all(re: &Regex, haystack: &str, mode: Mode) -> usize {
             }
             None => break,
         }
-    }
-    // Log timing for first run only
-    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        let msg = format!("DEBUG find_all: mode={:?} count={} elapsed={:?} haystack_len={} strategy={}\n",
-            mode, count, start_time.elapsed(), haystack.len(), re.strategy_name());
-        // Write to file since stderr might be captured
-        // Try multiple paths
-        let _ = std::fs::write("/root/quickjs_debug.txt", &msg);
-        let _ = std::fs::write("quickjs_debug.txt", &msg);
-        eprintln!("{}", msg);
     }
     count
 }
@@ -267,9 +248,5 @@ fn compile(b: &klv::Benchmark) -> anyhow::Result<Regex> {
     if b.regex.unicode {
         flags.insert(Flags::UNICODE);
     }
-    let re = Regex::with_flags(&pattern, flags)?;
-    // Debug: print pattern, flags, and strategy
-    eprintln!("DEBUG compile: pattern='{}' ci={} unicode={} flags={:?} strategy={}",
-        pattern, b.regex.case_insensitive, b.regex.unicode, flags, re.strategy_name());
-    Ok(re)
+    Ok(Regex::with_flags(&pattern, flags)?)
 }
