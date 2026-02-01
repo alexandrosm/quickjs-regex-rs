@@ -2212,6 +2212,7 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
     // Try to extract leading literal(s) or character class
     let mut literals = Vec::new();
     let mut is_pure_literal = true; // Track if we consumed the entire pattern
+    let mut depth = 0; // Track group nesting depth
 
     while let Some(c) = chars.next() {
         match c {
@@ -2246,6 +2247,7 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
 
             '(' => {
                 is_pure_literal = false;
+                depth += 1;
                 // Group - check for non-capturing or special
                 if chars.peek() == Some(&'?') {
                     chars.next();
@@ -2262,15 +2264,29 @@ fn analyze_pattern(pattern: &str, flags: Flags) -> SearchStrategy {
                 continue;
             }
 
-            ')' | '{' | '}' | '$' => {
+            ')' => {
+                is_pure_literal = false;
+                if depth > 0 {
+                    depth -= 1;
+                    continue; // Continue parsing after closing group
+                }
+                break;
+            }
+
+            '{' | '}' | '$' => {
                 is_pure_literal = false;
                 break;
             }
 
             '|' => {
-                // Alternation at top level - need to analyze all branches
-                // regardless of what literals we've accumulated so far
-                return analyze_alternation(pattern, case_insensitive);
+                is_pure_literal = false;
+                if depth == 0 {
+                    // Alternation at top level - analyze all branches
+                    return analyze_alternation(pattern, case_insensitive);
+                }
+                // Alternation inside a group - we can't safely extract a prefix
+                // Fall through and let the end check handle it
+                continue;
             }
 
             '\\' => {
