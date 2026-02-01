@@ -93,8 +93,11 @@ fn find_all(re: &Regex, haystack: &str, mode: Mode) -> usize {
     }
     // Log timing for first run only
     if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!("DEBUG find_all: mode={:?} count={} elapsed={:?} haystack_len={}",
-            mode, count, start_time.elapsed(), haystack.len());
+        let msg = format!("DEBUG find_all: mode={:?} count={} elapsed={:?} haystack_len={} strategy={}",
+            mode, count, start_time.elapsed(), haystack.len(), re.strategy_name());
+        // Write to file since stderr might be captured
+        let _ = std::fs::write("/tmp/quickjs_debug.txt", &msg);
+        eprintln!("{}", msg);
     }
     count
 }
