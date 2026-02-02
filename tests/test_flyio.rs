@@ -40,7 +40,9 @@ fn test_russian_haystack() {
     eprintln!("Total span sum: {}", sum);
     eprintln!("Expected span sum: 107391");
     eprintln!("Sample matches: {:?}", samples);
-    eprintln!("First 200 chars: {:?}", &haystack[..haystack.len().min(200)]);
+    // Get first ~200 chars safely (respecting UTF-8 boundaries)
+    let first_chars: String = haystack.chars().take(200).collect();
+    eprintln!("First 200 chars: {:?}", first_chars);
 
     // Should match approximately 107391 bytes of text
     assert!(sum > 100000, "Expected sum > 100000, got {}", sum);
