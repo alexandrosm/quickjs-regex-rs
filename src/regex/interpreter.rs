@@ -6,12 +6,17 @@
 //! - Precomputed bitmaps for \w, \d, \s
 //! - Efficient backtracking with truncate instead of pop loops
 //! - Bounds check elimination in release mode
+//! - Unicode-aware \w and \b when UNICODE flag is set
+
+use super::unicode::lre_is_id_continue;
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 const RE_HEADER_FLAGS: usize = 0;
+/// UNICODE flag bit (from flags.rs: 1 << 4)
+const FLAG_UNICODE: u16 = 0x10;
 const RE_HEADER_CAPTURE_COUNT: usize = 2;
 const RE_HEADER_REGISTER_COUNT: usize = 3;
 const RE_HEADER_BYTECODE_LEN: usize = 4;
@@ -49,6 +54,56 @@ fn bitmap_contains(c: u32, lo: u64, hi: u64) -> bool {
 #[inline(always)]
 fn is_word_char_fast(c: u32) -> bool {
     bitmap_contains(c, WORD_CHAR_LO, WORD_CHAR_HI)
+}
+
+/// Unicode-aware word character check.
+/// In Unicode mode, \w matches Unicode ID_Continue characters (letters, digits, connectors).
+/// This includes Cyrillic, Greek, CJK, and other scripts.
+#[inline(always)]
+fn is_word_char_unicode(c: u32) -> bool {
+    // Fast path: ASCII word chars
+    if c < 128 {
+        bitmap_contains(c, WORD_CHAR_LO, WORD_CHAR_HI)
+    } else {
+        // Unicode word character: ID_Continue property
+        lre_is_id_continue(c) != 0
+    }
+}
+
+/// Check if a RANGE bytecode represents the \w character class.
+/// Word char ranges (16-bit format):
+/// 0x30-0x39 (0-9), 0x41-0x5A (A-Z), 0x5F-0x5F (_), 0x61-0x7A (a-z)
+#[inline(always)]
+fn is_word_char_range(data: &[u8], pair_count: usize) -> bool {
+    // \w has exactly 4 pairs
+    if pair_count != 4 {
+        return false;
+    }
+    // Check the expected ranges (each pair is 4 bytes: low u16, high u16)
+    data == [
+        0x30, 0x00, 0x39, 0x00,  // 0-9
+        0x41, 0x00, 0x5A, 0x00,  // A-Z
+        0x5F, 0x00, 0x5F, 0x00,  // _
+        0x61, 0x00, 0x7A, 0x00,  // a-z
+    ]
+}
+
+/// Check if a RANGE32 bytecode represents the \w character class.
+/// Word char ranges (32-bit format):
+/// 0x30-0x39 (0-9), 0x41-0x5A (A-Z), 0x5F-0x5F (_), 0x61-0x7A (a-z)
+#[inline(always)]
+fn is_word_char_range32(data: &[u8], pair_count: usize) -> bool {
+    // \w has exactly 4 pairs
+    if pair_count != 4 {
+        return false;
+    }
+    // Check the expected ranges (each pair is 8 bytes: low u32, high u32)
+    data == [
+        0x30, 0x00, 0x00, 0x00, 0x39, 0x00, 0x00, 0x00,  // 0-9
+        0x41, 0x00, 0x00, 0x00, 0x5A, 0x00, 0x00, 0x00,  // A-Z
+        0x5F, 0x00, 0x00, 0x00, 0x5F, 0x00, 0x00, 0x00,  // _
+        0x61, 0x00, 0x00, 0x00, 0x7A, 0x00, 0x00, 0x00,  // a-z
+    ]
 }
 
 #[inline(always)]
@@ -166,6 +221,9 @@ pub struct ExecContext<'a> {
     // Save stacks for backtracking (packed for cache efficiency)
     capture_saves: Vec<(u32, Option<usize>)>,  // u32 index is enough
     register_saves: Vec<(u32, usize)>,
+
+    // Unicode mode flag - affects \w and \b behavior
+    unicode_mode: bool,
 }
 
 impl<'a> ExecContext<'a> {
@@ -173,6 +231,10 @@ impl<'a> ExecContext<'a> {
     pub fn new(bytecode: &'a [u8], input: &'a [u8]) -> Self {
         let capture_count = bytecode[RE_HEADER_CAPTURE_COUNT] as usize;
         let register_count = bytecode[RE_HEADER_REGISTER_COUNT] as usize;
+
+        // Read flags from bytecode header (2 bytes at offset 0)
+        let flags = u16::from_le_bytes([bytecode[RE_HEADER_FLAGS], bytecode[RE_HEADER_FLAGS + 1]]);
+        let unicode_mode = (flags & FLAG_UNICODE) != 0;
 
         // Estimate stack sizes based on bytecode complexity
         let bc_len = bytecode.len();
@@ -188,6 +250,7 @@ impl<'a> ExecContext<'a> {
             stack: Vec::with_capacity(estimated_stack),
             capture_saves: Vec::with_capacity(estimated_stack),
             register_saves: Vec::with_capacity(estimated_stack / 2),
+            unicode_mode,
         }
     }
 
@@ -576,7 +639,14 @@ impl<'a> ExecContext<'a> {
                     pc += data_len;
 
                     if let Some((c, new_pos)) = self.next_char(pos) {
-                        if check_range16_binary(c, &self.bytecode[data_start..data_start + data_len], pair_count) {
+                        // In Unicode mode, check for \w pattern and use Unicode-aware matching
+                        let range_data = &self.bytecode[data_start..data_start + data_len];
+                        let matched = if self.unicode_mode && is_word_char_range(range_data, pair_count) {
+                            is_word_char_unicode(c)
+                        } else {
+                            check_range16_binary(c, range_data, pair_count)
+                        };
+                        if matched {
                             pos = new_pos;
                             continue;
                         }
@@ -952,8 +1022,13 @@ impl<'a> ExecContext<'a> {
                 // WORD_BOUNDARY (28) - \b
                 // ============================================================
                 op::WORD_BOUNDARY => {
-                    let prev_word = self.prev_char(pos).map_or(false, |(c, _)| is_word_char_fast(c));
-                    let next_word = self.next_char(pos).map_or(false, |(c, _)| is_word_char_fast(c));
+                    let (prev_word, next_word) = if self.unicode_mode {
+                        (self.prev_char(pos).map_or(false, |(c, _)| is_word_char_unicode(c)),
+                         self.next_char(pos).map_or(false, |(c, _)| is_word_char_unicode(c)))
+                    } else {
+                        (self.prev_char(pos).map_or(false, |(c, _)| is_word_char_fast(c)),
+                         self.next_char(pos).map_or(false, |(c, _)| is_word_char_fast(c)))
+                    };
 
                     if prev_word != next_word {
                         continue;
@@ -968,8 +1043,13 @@ impl<'a> ExecContext<'a> {
                 // WORD_BOUNDARY_I (29) - \b case-insensitive
                 // ============================================================
                 op::WORD_BOUNDARY_I => {
-                    let prev_word = self.prev_char(pos).map_or(false, |(c, _)| is_word_char_fast(c));
-                    let next_word = self.next_char(pos).map_or(false, |(c, _)| is_word_char_fast(c));
+                    let (prev_word, next_word) = if self.unicode_mode {
+                        (self.prev_char(pos).map_or(false, |(c, _)| is_word_char_unicode(c)),
+                         self.next_char(pos).map_or(false, |(c, _)| is_word_char_unicode(c)))
+                    } else {
+                        (self.prev_char(pos).map_or(false, |(c, _)| is_word_char_fast(c)),
+                         self.next_char(pos).map_or(false, |(c, _)| is_word_char_fast(c)))
+                    };
 
                     if prev_word != next_word {
                         continue;
@@ -984,8 +1064,13 @@ impl<'a> ExecContext<'a> {
                 // NOT_WORD_BOUNDARY (30) - \B
                 // ============================================================
                 op::NOT_WORD_BOUNDARY => {
-                    let prev_word = self.prev_char(pos).map_or(false, |(c, _)| is_word_char_fast(c));
-                    let next_word = self.next_char(pos).map_or(false, |(c, _)| is_word_char_fast(c));
+                    let (prev_word, next_word) = if self.unicode_mode {
+                        (self.prev_char(pos).map_or(false, |(c, _)| is_word_char_unicode(c)),
+                         self.next_char(pos).map_or(false, |(c, _)| is_word_char_unicode(c)))
+                    } else {
+                        (self.prev_char(pos).map_or(false, |(c, _)| is_word_char_fast(c)),
+                         self.next_char(pos).map_or(false, |(c, _)| is_word_char_fast(c)))
+                    };
 
                     if prev_word == next_word {
                         continue;
@@ -1000,8 +1085,13 @@ impl<'a> ExecContext<'a> {
                 // NOT_WORD_BOUNDARY_I (31) - \B case-insensitive
                 // ============================================================
                 op::NOT_WORD_BOUNDARY_I => {
-                    let prev_word = self.prev_char(pos).map_or(false, |(c, _)| is_word_char_fast(c));
-                    let next_word = self.next_char(pos).map_or(false, |(c, _)| is_word_char_fast(c));
+                    let (prev_word, next_word) = if self.unicode_mode {
+                        (self.prev_char(pos).map_or(false, |(c, _)| is_word_char_unicode(c)),
+                         self.next_char(pos).map_or(false, |(c, _)| is_word_char_unicode(c)))
+                    } else {
+                        (self.prev_char(pos).map_or(false, |(c, _)| is_word_char_fast(c)),
+                         self.next_char(pos).map_or(false, |(c, _)| is_word_char_fast(c)))
+                    };
 
                     if prev_word == next_word {
                         continue;
@@ -1170,8 +1260,15 @@ impl<'a> ExecContext<'a> {
                     pc += data_len;
 
                     if let Some((c, new_pos)) = self.next_char(pos) {
-                        let c_lower = to_lower_fast(c);
-                        if check_range16_binary(c_lower, &self.bytecode[data_start..data_start + data_len], pair_count) {
+                        let range_data = &self.bytecode[data_start..data_start + data_len];
+                        // In Unicode mode, check for \w pattern and use Unicode-aware matching
+                        let matched = if self.unicode_mode && is_word_char_range(range_data, pair_count) {
+                            is_word_char_unicode(c)
+                        } else {
+                            let c_lower = to_lower_fast(c);
+                            check_range16_binary(c_lower, range_data, pair_count)
+                        };
+                        if matched {
                             pos = new_pos;
                             continue;
                         }
@@ -1193,7 +1290,14 @@ impl<'a> ExecContext<'a> {
                     pc += data_len;
 
                     if let Some((c, new_pos)) = self.next_char(pos) {
-                        if check_range32_binary(c, &self.bytecode[data_start..data_start + data_len], pair_count) {
+                        let range_data = &self.bytecode[data_start..data_start + data_len];
+                        // In Unicode mode, check for \w pattern and use Unicode-aware matching
+                        let matched = if self.unicode_mode && is_word_char_range32(range_data, pair_count) {
+                            is_word_char_unicode(c)
+                        } else {
+                            check_range32_binary(c, range_data, pair_count)
+                        };
+                        if matched {
                             pos = new_pos;
                             continue;
                         }
@@ -1215,8 +1319,15 @@ impl<'a> ExecContext<'a> {
                     pc += data_len;
 
                     if let Some((c, new_pos)) = self.next_char(pos) {
-                        let c_lower = to_lower_fast(c);
-                        if check_range32_binary(c_lower, &self.bytecode[data_start..data_start + data_len], pair_count) {
+                        let range_data = &self.bytecode[data_start..data_start + data_len];
+                        // In Unicode mode, check for \w pattern and use Unicode-aware matching
+                        let matched = if self.unicode_mode && is_word_char_range32(range_data, pair_count) {
+                            is_word_char_unicode(c)
+                        } else {
+                            let c_lower = to_lower_fast(c);
+                            check_range32_binary(c_lower, range_data, pair_count)
+                        };
+                        if matched {
                             pos = new_pos;
                             continue;
                         }

@@ -13,15 +13,12 @@ fn test_ascii_only() {
     assert_eq!(&text[m.start..m.end], "Hello");
 }
 
-/// Test that \w+ does NOT match Cyrillic (per ECMAScript spec)
+/// Test that \w+ matches Cyrillic in Unicode mode (rust/regex compatibility)
 ///
-/// This is expected behavior: QuickJS follows ECMAScript semantics where
-/// \w means [a-zA-Z0-9_] regardless of the unicode flag. The unicode flag
-/// affects surrogate pair handling, not \w semantics.
-///
-/// Note: This differs from rust/regex where \w with unicode is Unicode-aware.
+/// When UNICODE flag is set, \w matches Unicode word characters including
+/// Cyrillic, Greek, CJK, and other scripts. This matches rust/regex behavior.
 #[test]
-fn test_cyrillic_not_matched() {
+fn test_cyrillic_matched_in_unicode_mode() {
     let text = "Привет мир"; // "Hello world" in Russian
 
     // Create regex with UNICODE flag
@@ -29,14 +26,27 @@ fn test_cyrillic_not_matched() {
     flags.insert(Flags::UNICODE);
     let re = Regex::with_flags(r"\w+", flags).unwrap();
 
-    // ECMAScript: \w is ASCII-only, so no match for Cyrillic
+    // In Unicode mode, \w matches Cyrillic characters
     let result = re.find(text);
-    assert!(result.is_none(), "\\w should not match Cyrillic per ECMAScript spec");
+    assert!(result.is_some(), "\\w should match Cyrillic in Unicode mode");
+    let m = result.unwrap();
+    assert_eq!(&text[m.start..m.end], "Привет");
 }
 
-/// Test mixed ASCII and Cyrillic text
+/// Test that \w+ does NOT match Cyrillic without Unicode flag
 #[test]
-fn test_mixed_ascii_cyrillic() {
+fn test_cyrillic_not_matched_without_unicode() {
+    let text = "Привет мир"; // "Hello world" in Russian
+
+    // Without UNICODE flag, \w is ASCII-only
+    let re = Regex::new(r"\w+").unwrap();
+    let result = re.find(text);
+    assert!(result.is_none(), "\\w should not match Cyrillic without Unicode flag");
+}
+
+/// Test mixed ASCII and Cyrillic text in Unicode mode
+#[test]
+fn test_mixed_ascii_cyrillic_unicode_mode() {
     let text = "Hello Мир World";
 
     let mut flags = Flags::empty();
@@ -62,10 +72,10 @@ fn test_mixed_ascii_cyrillic() {
         }
     }
 
-    // Only ASCII words are matched (per ECMAScript spec)
+    // In Unicode mode, all words including Cyrillic are matched
     assert!(words.contains(&"Hello".to_string()));
     assert!(words.contains(&"World".to_string()));
-    assert!(!words.contains(&"Мир".to_string()), "Cyrillic should not match");
+    assert!(words.contains(&"Мир".to_string()), "Cyrillic should match in Unicode mode");
 }
 
 /// Test that UTF-8 text doesn't cause panics when scanning
