@@ -757,6 +757,15 @@ impl Regex {
         Self::with_flags(pattern, Flags::empty())
     }
 
+    /// Get the bytecode for debugging purposes
+    #[doc(hidden)]
+    pub fn debug_bytecode(&self) -> &[u8] {
+        unsafe {
+            let bc_len = self.bytecode_len();
+            std::slice::from_raw_parts(self.bytecode, bc_len)
+        }
+    }
+
     /// Compile a new regular expression with flags
     pub fn with_flags(pattern: &str, flags: Flags) -> Result<Self> {
         // Extract inline flags from pattern (e.g., (?i), (?m), (?s), etc.)
