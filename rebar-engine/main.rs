@@ -252,10 +252,6 @@ fn compile(b: &klv::Benchmark) -> anyhow::Result<Regex> {
     }
     if b.regex.unicode {
         flags.insert(Flags::UNICODE);
-        eprintln!("DEBUG: UNICODE flag set for pattern: {}", pattern);
     }
-    let re = Regex::with_flags(&pattern, flags)?;
-    eprintln!("DEBUG: Compiled regex with flags={:?}, bytecode[0..2]={:02x?}",
-              flags, &re.debug_bytecode()[0..2]);
-    Ok(re)
+    Ok(Regex::with_flags(&pattern, flags)?)
 }

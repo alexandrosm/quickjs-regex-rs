@@ -1078,17 +1078,26 @@ impl Regex {
     #[inline]
     fn find_with_word_char_scan(&self, text: &str) -> Option<Match> {
         let bytes = text.as_bytes();
+        let unicode_mode = self.flags.contains(Flags::UNICODE);
         let mut start = 0;
 
         while start < bytes.len() {
-            if let Some(pos) = find_word_char(&bytes[start..]) {
-                let abs_pos = start + pos;
-                if let Some(m) = self.try_match_at(text, abs_pos) {
-                    return Some(m);
-                }
-                start = abs_pos + 1;
+            // In Unicode mode, also scan for high bytes (could be Unicode word chars)
+            let pos = if unicode_mode {
+                find_unicode_word_char(&bytes[start..])
             } else {
-                break;
+                find_word_char(&bytes[start..])
+            };
+
+            match pos {
+                Some(p) => {
+                    let abs_pos = start + p;
+                    if let Some(m) = self.try_match_at(text, abs_pos) {
+                        return Some(m);
+                    }
+                    start = abs_pos + 1;
+                }
+                None => break,
             }
         }
         None
@@ -1415,14 +1424,27 @@ impl Regex {
     #[inline]
     fn find_at_word_char(&self, text: &str, start: usize) -> Option<Match> {
         let bytes = &text.as_bytes()[start..];
+        let unicode_mode = self.flags.contains(Flags::UNICODE);
         let mut offset = 0;
 
-        while let Some(pos) = find_word_char(&bytes[offset..]) {
-            let abs_pos = start + offset + pos;
-            if let Some(m) = self.try_match_at(text, abs_pos) {
-                return Some(m);
+        while offset < bytes.len() {
+            // In Unicode mode, also scan for high bytes (could be Unicode word chars)
+            let pos = if unicode_mode {
+                find_unicode_word_char(&bytes[offset..])
+            } else {
+                find_word_char(&bytes[offset..])
+            };
+
+            match pos {
+                Some(p) => {
+                    let abs_pos = start + offset + p;
+                    if let Some(m) = self.try_match_at(text, abs_pos) {
+                        return Some(m);
+                    }
+                    offset += p + 1;
+                }
+                None => break,
             }
-            offset += pos + 1;
         }
         None
     }
@@ -2965,6 +2987,18 @@ static WORD_CHAR_BITMAP: ByteBitmap = {
     ByteBitmap { bits }
 };
 
+/// Word chars + all high bytes (0x80-0xFF) for Unicode mode
+/// In Unicode mode, \w matches ID_Continue which includes Cyrillic, Greek, etc.
+/// High bytes are UTF-8 lead/continuation bytes that could be Unicode word chars.
+static UNICODE_WORD_CHAR_BITMAP: ByteBitmap = {
+    let mut bits = [0u64; 4];
+    bits[0] = 0x03FF_0000_0000_0000;  // '0'-'9' (48-57)
+    bits[1] = 0x07FF_FFFE_87FF_FFFE;  // A-Z (1-26), _ (31), a-z (33-58)
+    bits[2] = 0xFFFF_FFFF_FFFF_FFFF;  // 128-191 (all high bytes)
+    bits[3] = 0xFFFF_FFFF_FFFF_FFFF;  // 192-255 (all high bytes)
+    ByteBitmap { bits }
+};
+
 static WHITESPACE_BITMAP: ByteBitmap = {
     let mut bits = [0u64; 4];
     bits[0] = (1u64 << 32) | (1u64 << 9) | (1u64 << 10) | (1u64 << 11) | (1u64 << 12) | (1u64 << 13);
@@ -2982,6 +3016,13 @@ fn find_digit(bytes: &[u8]) -> Option<usize> {
 fn find_word_char(bytes: &[u8]) -> Option<usize> {
     // For word chars, bitmap is actually good since we have 63 possible bytes
     WORD_CHAR_BITMAP.find_in_slice(bytes)
+}
+
+/// Find the first word character or high byte (for Unicode mode)
+/// In Unicode mode, any byte >= 0x80 could start a Unicode word character
+#[inline]
+fn find_unicode_word_char(bytes: &[u8]) -> Option<usize> {
+    UNICODE_WORD_CHAR_BITMAP.find_in_slice(bytes)
 }
 
 /// Find the first whitespace character
