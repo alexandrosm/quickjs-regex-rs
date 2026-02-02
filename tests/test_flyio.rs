@@ -4,11 +4,9 @@ use quickjs_regex::{Regex, Flags};
 #[test]
 #[ignore] // Only run manually
 fn test_russian_haystack() {
-    let text = std::fs::read_to_string("/root/rebar/benchmarks/haystacks/opensubtitles/ru-sampled.txt")
+    // Use the same file as rebar benchmark: ru-huge.txt
+    let haystack = std::fs::read_to_string("/root/rebar/benchmarks/haystacks/opensubtitles/ru-huge.txt")
         .expect("failed to read file");
-
-    // Get first 2500 lines
-    let haystack: String = text.lines().take(2500).collect::<Vec<_>>().join("\n");
 
     let mut flags = Flags::empty();
     flags.insert(Flags::UNICODE);
@@ -38,12 +36,12 @@ fn test_russian_haystack() {
 
     eprintln!("Total matches: {}", count);
     eprintln!("Total span sum: {}", sum);
-    eprintln!("Expected span sum: 107391");
+    eprintln!("Expected span sum: 529194 (rebar benchmark)");
     eprintln!("Sample matches: {:?}", samples);
     // Get first ~200 chars safely (respecting UTF-8 boundaries)
     let first_chars: String = haystack.chars().take(200).collect();
     eprintln!("First 200 chars: {:?}", first_chars);
 
-    // Should match approximately 107391 bytes of text
-    assert!(sum > 100000, "Expected sum > 100000, got {}", sum);
+    // Should match approximately 529194 bytes of text (rebar benchmark expected value)
+    assert!(sum > 500000, "Expected sum > 500000, got {}", sum);
 }
