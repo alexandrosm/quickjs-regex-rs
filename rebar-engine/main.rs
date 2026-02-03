@@ -152,10 +152,10 @@ fn model_count_captures(
         let mut count = 0;
         let mut pos = 0;
         while pos < haystack.len() {
-            // Note: captures always uses C engine (no pure Rust implementation yet)
             let caps = match mode {
                 Mode::Hybrid => re.captures(&haystack[pos..]),
-                Mode::PureRust | Mode::CEngine => re.captures_at(haystack, pos),
+                Mode::PureRust => re.captures_at_pure_rust(haystack, pos),
+                Mode::CEngine => re.captures_at(haystack, pos),
             };
             match caps {
                 Some(caps) => {
@@ -214,10 +214,10 @@ fn model_grep_captures(
         for line in haystack.lines() {
             let mut pos = 0;
             while pos < line.len() {
-                // Note: captures always uses C engine (no pure Rust implementation yet)
                 let caps = match mode {
                     Mode::Hybrid => re.captures(&line[pos..]),
-                    Mode::PureRust | Mode::CEngine => re.captures_at(line, pos),
+                    Mode::PureRust => re.captures_at_pure_rust(line, pos),
+                    Mode::CEngine => re.captures_at(line, pos),
                 };
                 match caps {
                     Some(caps) => {

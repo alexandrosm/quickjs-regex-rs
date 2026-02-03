@@ -1806,6 +1806,54 @@ impl Regex {
             groups,
         })
     }
+
+    /// Get capture groups using the pure Rust interpreter.
+    /// This is a safer alternative to captures_at which uses the C engine.
+    #[doc(hidden)]
+    pub fn captures_at_pure_rust(&self, text: &str, start: usize) -> Option<Captures> {
+        let text_bytes = text.as_bytes();
+        let capture_count = self.capture_count();
+
+        // SAFETY: bytecode is valid from constructor
+        let bytecode = unsafe {
+            std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
+        };
+
+        let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
+
+        // Try matching at each position starting from 'start'
+        let mut pos = start;
+        while pos <= text.len() {
+            match ctx.exec(pos) {
+                interpreter::ExecResult::Match => {
+                    // Extract captures from context
+                    let mut groups = Vec::with_capacity(capture_count);
+                    for i in 0..capture_count {
+                        let cap_start = ctx.captures.get(i * 2).copied().flatten();
+                        let cap_end = ctx.captures.get(i * 2 + 1).copied().flatten();
+                        match (cap_start, cap_end) {
+                            (Some(s), Some(e)) => groups.push(Some((s, e))),
+                            _ => groups.push(None),
+                        }
+                    }
+                    return Some(Captures {
+                        text: text.to_string(),
+                        groups,
+                    });
+                }
+                interpreter::ExecResult::NoMatch => {
+                    // Advance by one UTF-8 char
+                    if pos < text.len() {
+                        pos += text[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    } else {
+                        break;
+                    }
+                    ctx.reset();
+                }
+            }
+        }
+        None
+    }
 }
 
 impl Drop for Regex {
