@@ -1961,6 +1961,12 @@ impl Captures {
             opt.map(|(start, end)| Match { start, end })
         })
     }
+
+    /// Count the number of capture groups that actually matched (non-None).
+    /// This is different from `len()` which returns the total number of groups.
+    pub fn count_matched(&self) -> usize {
+        self.groups.iter().filter(|g| g.is_some()).count()
+    }
 }
 
 /// Match iterator enum - dispatches between literal and general matching

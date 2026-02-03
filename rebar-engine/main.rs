@@ -159,7 +159,8 @@ fn model_count_captures(
             };
             match caps {
                 Some(caps) => {
-                    count += caps.len();
+                    // Count only groups that actually matched (non-None)
+                    count += caps.count_matched();
                     if let Some(m) = caps.get(0) {
                         let end = match mode {
                             Mode::Hybrid => pos + m.end,
@@ -221,7 +222,7 @@ fn model_grep_captures(
                 };
                 match caps {
                     Some(caps) => {
-                        count += caps.len();
+                        count += caps.count_matched();
                         if let Some(m) = caps.get(0) {
                             let end = match mode {
                                 Mode::Hybrid => pos + m.end,
