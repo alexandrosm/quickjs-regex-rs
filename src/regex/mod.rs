@@ -31,6 +31,9 @@ mod compiler;
 // Selective applicative functor for regex static analysis
 pub mod selective;
 
+// Pike VM: thread-list based execution (linear time, no backtracking)
+pub mod pikevm;
+
 // Legacy C engine modules — only needed for benchmark comparison via find_at_c_engine()
 #[allow(dead_code)]
 mod unicode;
@@ -759,6 +762,8 @@ pub struct Regex {
     owned_bytecode: Option<Vec<u8>>,
     /// Selective prefilter derived from AST analysis
     selective_prefilter: selective::Prefilter,
+    /// Whether this pattern is safe for Pike VM (no backrefs)
+    use_pike_vm: bool,
     /// Aho-Corasick automaton for multi-literal prefiltering
     ac_prefilter: Option<AhoCorasick>,
     /// Memmem finder for single-literal prefiltering
@@ -829,6 +834,10 @@ impl Regex {
             _ => (None, None),
         };
 
+        // Use Pike VM for patterns without backreferences (guaranteed linear time).
+        // Skip Pike VM for Unicode mode (interpreter has special \w/\b Unicode handling).
+        let use_pike = !info.has_backrefs && !final_flags.contains(Flags::UNICODE);
+
         Ok(Regex {
             bytecode: bytecode_ptr,
             pattern: pattern.to_string(),
@@ -836,6 +845,7 @@ impl Regex {
             strategy,
             owned_bytecode: Some(bytecode_vec),
             selective_prefilter: sel_prefilter,
+            use_pike_vm: use_pike,
             ac_prefilter,
             memmem_prefilter,
         })
@@ -1348,34 +1358,39 @@ impl Regex {
     }
 
     /// Try to match at an exact position (no scanning).
-    /// This is the internal method that runs the interpreter at a specific offset.
+    /// Uses Pike VM for safe patterns (linear time), backtracker for others.
     #[inline]
     fn try_match_at(&self, text: &str, pos: usize) -> Option<Match> {
         let text_bytes = text.as_bytes();
-
-        // SAFETY: bytecode is valid from constructor
         let bytecode = unsafe {
             std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
         };
 
-        let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
-
-        match ctx.exec(pos) {
-            interpreter::ExecResult::Match => {
-                // Extract match from captures
-                if let (Some(match_start), Some(match_end)) = (
-                    ctx.captures.get(0).copied().flatten(),
-                    ctx.captures.get(1).copied().flatten()
-                ) {
-                    Some(Match {
-                        start: match_start,
-                        end: match_end,
-                    })
-                } else {
-                    None
+        if self.use_pike_vm {
+            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+            match vm.exec(pos) {
+                pikevm::PikeResult::Match(caps) => {
+                    let start = caps.get(0).copied().flatten()?;
+                    let end = caps.get(1).copied().flatten()?;
+                    Some(Match { start, end })
                 }
+                pikevm::PikeResult::NoMatch => None,
             }
-            interpreter::ExecResult::NoMatch => None,
+        } else {
+            let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
+            match ctx.exec(pos) {
+                interpreter::ExecResult::Match => {
+                    if let (Some(match_start), Some(match_end)) = (
+                        ctx.captures.get(0).copied().flatten(),
+                        ctx.captures.get(1).copied().flatten()
+                    ) {
+                        Some(Match { start: match_start, end: match_end })
+                    } else {
+                        None
+                    }
+                }
+                interpreter::ExecResult::NoMatch => None,
+            }
         }
     }
 

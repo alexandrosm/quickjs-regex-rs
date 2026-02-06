@@ -110,6 +110,8 @@ pub struct StaticInfo {
     pub has_backrefs: bool,
     /// Whether any branch uses lookahead (needs special handling)
     pub has_lookahead: bool,
+    /// Whether any repetition uses lazy (non-greedy) quantifiers
+    pub has_lazy: bool,
 }
 
 impl StaticInfo {
@@ -127,6 +129,7 @@ impl StaticInfo {
             can_match_empty: true,
             has_backrefs: false,
             has_lookahead: false,
+            has_lazy: false,
         }
     }
 }
@@ -156,6 +159,7 @@ pub fn analyze(node: &RegexS) -> StaticInfo {
                 required_captures: HashSet::new(),
                 possible_captures: HashSet::new(),
                 can_match_empty: false,
+                has_lazy: false,
                 has_backrefs: false,
                 has_lookahead: false,
             }
@@ -250,6 +254,7 @@ pub fn analyze(node: &RegexS) -> StaticInfo {
                 info.possible_captures.extend(sub_info.possible_captures);
                 info.has_backrefs = info.has_backrefs || sub_info.has_backrefs;
                 info.has_lookahead = info.has_lookahead || sub_info.has_lookahead;
+                info.has_lazy = info.has_lazy || sub_info.has_lazy;
 
                 if sub_info.anchored_start && subs.first().map(|s| std::ptr::eq(s, sub)).unwrap_or(false) {
                     info.anchored_start = true;
@@ -306,6 +311,7 @@ pub fn analyze(node: &RegexS) -> StaticInfo {
 
                 info.has_backrefs = info.has_backrefs || alt_info.has_backrefs;
                 info.has_lookahead = info.has_lookahead || alt_info.has_lookahead;
+                info.has_lazy = info.has_lazy || alt_info.has_lazy;
             }
 
             // Required literals: only those required by ALL branches
@@ -326,7 +332,7 @@ pub fn analyze(node: &RegexS) -> StaticInfo {
             info
         }
 
-        RegexS::Repeat { sub, min, max, .. } => {
+        RegexS::Repeat { sub, min, max, greedy, .. } => {
             let sub_info = analyze(sub);
             let mut info = StaticInfo::empty();
 
@@ -341,6 +347,7 @@ pub fn analyze(node: &RegexS) -> StaticInfo {
             info.possible_captures = sub_info.possible_captures;
             info.has_backrefs = sub_info.has_backrefs;
             info.has_lookahead = sub_info.has_lookahead;
+            info.has_lazy = sub_info.has_lazy || !greedy;
 
             // Required literals: only if min > 0
             if *min > 0 {
