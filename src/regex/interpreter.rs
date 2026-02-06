@@ -246,9 +246,12 @@ pub enum ExecResult {
 // Execution Context
 // ============================================================================
 
+/// Maximum number of backtrack steps before giving up (prevents exponential blowup)
+const MAX_BACKTRACK_STEPS: usize = 1_000_000;
+
 pub struct ExecContext<'a> {
     input: &'a [u8],
-    input_len: usize,  // Cache length to avoid repeated .len() calls
+    input_len: usize,
     bytecode: &'a [u8],
 
     // Captures: indices into input (start, end pairs)
@@ -260,6 +263,7 @@ pub struct ExecContext<'a> {
 
     // Backtracking stack
     stack: Vec<StackFrame>,
+    backtrack_count: usize,
 
     // Save stacks for backtracking (packed for cache efficiency)
     capture_saves: Vec<(u32, Option<usize>)>,  // u32 index is enough
@@ -291,6 +295,7 @@ impl<'a> ExecContext<'a> {
             capture_count,
             registers: vec![0; register_count],
             stack: Vec::with_capacity(estimated_stack),
+            backtrack_count: 0,
             capture_saves: Vec::with_capacity(estimated_stack),
             register_saves: Vec::with_capacity(estimated_stack / 2),
             unicode_mode,
@@ -303,6 +308,7 @@ impl<'a> ExecContext<'a> {
         self.captures.fill(None);
         self.registers.fill(0);
         self.stack.clear();
+        self.backtrack_count = 0;
         self.capture_saves.clear();
         self.register_saves.clear();
     }
@@ -501,9 +507,14 @@ impl<'a> ExecContext<'a> {
         self.register_saves.truncate(reg_start);
     }
 
-    /// Backtrack to previous state
+    /// Backtrack to previous state. Returns None if stack empty or limit exceeded.
     #[inline]
     fn backtrack(&mut self) -> Option<(usize, usize)> {
+        self.backtrack_count += 1;
+        if self.backtrack_count > MAX_BACKTRACK_STEPS {
+            self.stack.clear();
+            return None;
+        }
         while let Some(frame) = self.stack.pop() {
             self.restore_state(frame.capture_save_idx, frame.register_save_idx);
 

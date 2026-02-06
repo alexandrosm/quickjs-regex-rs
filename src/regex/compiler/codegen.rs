@@ -437,6 +437,10 @@ impl CodeGenerator {
     // ========================================================================
 
     fn compile_repeat(&mut self, sub: &Node, min: u32, max: Option<u32>, greedy: bool) -> Result<()> {
+        // Find capture groups inside the sub-expression for SaveReset (JS semantics:
+        // captures inside a loop are reset at each iteration)
+        let captures = self.find_captures(sub);
+
         match (min, max) {
             (0, Some(1)) => { // ?
                 let split_op = if greedy { OpCode::SplitNextFirst } else { OpCode::SplitGotoFirst };
@@ -449,6 +453,7 @@ impl CodeGenerator {
                 let split_op = if greedy { OpCode::SplitNextFirst } else { OpCode::SplitGotoFirst };
                 let loop_start = self.builder.pc();
                 let split_pc = self.builder.emit_goto(split_op, 0);
+                self.emit_save_reset(&captures);
                 self.compile_node(sub)?;
                 let goto_pc = self.builder.pc();
                 self.builder.emit_goto(OpCode::Goto, 0);
@@ -459,6 +464,7 @@ impl CodeGenerator {
             (1, None) => { // +
                 let split_op = if greedy { OpCode::SplitGotoFirst } else { OpCode::SplitNextFirst };
                 let loop_start = self.builder.pc();
+                self.emit_save_reset(&captures);
                 self.compile_node(sub)?;
                 let split_pc = self.builder.emit_goto(split_op, 0);
                 self.builder.patch_goto(split_pc, loop_start);
@@ -481,6 +487,7 @@ impl CodeGenerator {
                 let split_op = if greedy { OpCode::SplitNextFirst } else { OpCode::SplitGotoFirst };
                 let loop_start = self.builder.pc();
                 let split_pc = self.builder.emit_goto(split_op, 0);
+                self.emit_save_reset(&captures);
                 self.compile_node(sub)?;
                 let goto_pc = self.builder.pc();
                 self.builder.emit_goto(OpCode::Goto, 0);
@@ -490,6 +497,41 @@ impl CodeGenerator {
             }
         }
         Ok(())
+    }
+
+    /// Find all capture group indices inside a node.
+    fn find_captures(&self, node: &Node) -> Vec<u32> {
+        let mut caps = Vec::new();
+        self.walk_captures(node, &mut caps);
+        caps
+    }
+
+    fn walk_captures(&self, node: &Node, caps: &mut Vec<u32>) {
+        match node {
+            Node::Capture { index, sub, .. } => {
+                caps.push(*index);
+                self.walk_captures(sub, caps);
+            }
+            Node::Concat(nodes) | Node::Alternation(nodes) => {
+                for n in nodes { self.walk_captures(n, caps); }
+            }
+            Node::Group(sub) => self.walk_captures(sub, caps),
+            Node::Repeat { sub, .. } => self.walk_captures(sub, caps),
+            Node::Lookahead { sub, .. } | Node::Lookbehind { sub, .. } => {
+                self.walk_captures(sub, caps);
+            }
+            _ => {}
+        }
+    }
+
+    /// Emit SaveReset opcodes for captures inside a loop body (JS semantics).
+    fn emit_save_reset(&mut self, captures: &[u32]) {
+        if captures.is_empty() { return; }
+        let min_cap = *captures.iter().min().unwrap();
+        let max_cap = *captures.iter().max().unwrap();
+        self.builder.emit_op(OpCode::SaveReset);
+        self.builder.push(min_cap as u8);
+        self.builder.push(max_cap as u8);
     }
 
     // ========================================================================

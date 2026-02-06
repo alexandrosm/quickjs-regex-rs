@@ -398,14 +398,12 @@ mod lookaround {
     }
 
     #[test]
-    #[ignore] // Lookbehind appears to have issues in the QuickJS engine
     fn positive_lookbehind() {
         test_exec(r"(?<=foo)bar", "foobar", Some(("bar", 3, &["bar"])));
         test_match(r"(?<=foo)bar", "bazbar", false);
     }
 
     #[test]
-    #[ignore] // Lookbehind appears to have issues in the QuickJS engine
     fn negative_lookbehind() {
         test_exec(r"(?<!foo)bar", "bazbar", Some(("bar", 3, &["bar"])));
         test_match(r"(?<!foo)bar", "foobar", false);
@@ -502,12 +500,11 @@ mod edge_cases {
     }
 
     #[test]
-    #[ignore] // This test demonstrates exponential backtracking - engine lacks protection
     fn catastrophic_backtracking_protection() {
-        // This pattern could cause exponential backtracking
-        // Note: QuickJS regex engine doesn't have built-in backtracking protection
+        // This pattern would cause exponential backtracking without a limit.
+        // The interpreter has a backtrack step limit that prevents hanging.
         let re = Regex::new("(a+)+b").unwrap();
-        let input = "a".repeat(15) + "c"; // Smaller input
+        let input = "a".repeat(25) + "c";
         assert!(!re.is_match(&input));
     }
 }
