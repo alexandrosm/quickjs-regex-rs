@@ -25,8 +25,11 @@ mod util;
 // Pure Rust interpreter
 mod interpreter;
 
-// Pure Rust compiler (using regex-syntax)
+// Pure Rust compiler (custom JS parser)
 mod compiler;
+
+// Selective applicative functor for regex static analysis
+pub mod selective;
 
 // Legacy C engine modules — only needed for benchmark comparison via find_at_c_engine()
 #[allow(dead_code)]
