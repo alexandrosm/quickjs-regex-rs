@@ -297,6 +297,19 @@ mod tests {
     }
 
     #[test]
+    fn test_aws_keys_full_via_find_at() {
+        // Replicate exact rebar code path: Regex::with_flags → find_at
+        let pattern = r#"(('|")((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))('|").*?(\n^.*?){0,4}(('|")[a-zA-Z0-9+/]{40}('|"))+|('|")[a-zA-Z0-9+/]{40}('|").*?(\n^.*?){0,3}('|")((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))('|"))+"#;
+        let haystack = r#""AIDAABCDEFGHIJKLMNOP""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#;
+        let re = crate::regex::Regex::with_flags(pattern, Flags::empty()).unwrap();
+        // Test via find (uses find_at internally)
+        let m = re.find(haystack);
+        eprintln!("find: {:?}", m);
+        // Also test via is_match
+        assert!(re.is_match(haystack), "is_match should work");
+    }
+
+    #[test]
     fn test_aws_keys_full_pattern() {
         // Debug: test sub-patterns
         let h = r#""AIDAABCDEFGHIJKLMNOP""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#;

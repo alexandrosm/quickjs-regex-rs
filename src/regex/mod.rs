@@ -1332,8 +1332,13 @@ impl Regex {
             }
 
             SearchStrategy::None => {
-                // Use selective prefilter if available, otherwise linear scan
-                if !matches!(self.selective_prefilter, selective::Prefilter::None) {
+                // Use selective prefilter if it has a literal scanner, otherwise linear scan
+                if matches!(self.selective_prefilter,
+                    selective::Prefilter::MemmemStart(_) |
+                    selective::Prefilter::MemmemInner { .. } |
+                    selective::Prefilter::AhoCorasickStart(_) |
+                    selective::Prefilter::AhoCorasickInner { .. }
+                ) {
                     self.find_at_with_selective_prefilter(text, start)
                 } else {
                     self.find_at_linear(text, start)
