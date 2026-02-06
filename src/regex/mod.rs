@@ -1637,9 +1637,11 @@ impl Regex {
     /// Fallback: Linear scan trying every position from start
     #[inline]
     /// Find using selective prefilter to skip to candidate positions.
-    /// For inner literals: find the literal, back up to where match could start,
-    /// try matching, and if it fails skip past the literal to avoid re-scanning.
     fn find_at_with_selective_prefilter(&self, text: &str, start: usize) -> Option<Match> {
+        // Pike VM has its own prefix loop — single call is enough
+        if self.use_pike_vm {
+            return self.try_match_at(text, start);
+        }
         let bytes = text.as_bytes();
         let mut search_from = start;
         while search_from <= text.len() {
@@ -1685,12 +1687,15 @@ impl Regex {
     }
 
     fn find_at_linear(&self, text: &str, start: usize) -> Option<Match> {
+        if self.use_pike_vm {
+            // Pike VM has its own prefix loop — single call scans the whole input
+            return self.try_match_at(text, start);
+        }
         let mut pos = start;
         while pos <= text.len() {
             if let Some(m) = self.try_match_at(text, pos) {
                 return Some(m);
             }
-            // Advance by one UTF-8 char
             if pos < text.len() {
                 pos += text[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
             } else {
