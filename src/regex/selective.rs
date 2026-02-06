@@ -165,14 +165,17 @@ pub fn analyze(node: &RegexS) -> StaticInfo {
             let start = match spec {
                 ClassSpec::Digit => Some((b'0'..=b'9').collect()),
                 ClassSpec::Space => Some(vec![b' ', b'\t', b'\n', b'\r']),
-                ClassSpec::Ranges(ranges) if !ranges.is_empty() => {
+                ClassSpec::Ranges(ranges) if !ranges.is_empty() && ranges.len() <= 6 => {
+                    // Only generate start_bytes for small, ASCII-dominated classes.
+                    // Large Unicode classes (like \p{L}) span too many byte ranges
+                    // and would produce an incomplete/misleading prefilter.
                     let mut bytes = vec![];
                     for &(lo, _hi) in ranges {
                         if (lo as u32) < 128 {
                             bytes.push(lo as u8);
                         }
                     }
-                    if bytes.is_empty() { None } else { Some(bytes) }
+                    if bytes.is_empty() || bytes.len() > 8 { None } else { Some(bytes) }
                 }
                 _ => None,
             };
