@@ -1616,22 +1616,50 @@ impl Regex {
 
     /// Fallback: Linear scan trying every position from start
     #[inline]
-    /// Find using selective prefilter to skip to candidate positions
+    /// Find using selective prefilter to skip to candidate positions.
+    /// For inner literals: find the literal, back up to where match could start,
+    /// try matching, and if it fails skip past the literal to avoid re-scanning.
     fn find_at_with_selective_prefilter(&self, text: &str, start: usize) -> Option<Match> {
         let bytes = text.as_bytes();
-        let mut pos = start;
-        while pos <= text.len() {
-            let candidate = self.next_candidate(bytes, pos);
-            if candidate > text.len() { break; }
-            pos = candidate;
-            if let Some(m) = self.try_match_at(text, pos) {
+        let mut search_from = start;
+        while search_from <= text.len() {
+            // Find next literal occurrence
+            let remaining = &bytes[search_from..];
+            let lit_pos = match &self.selective_prefilter {
+                selective::Prefilter::MemmemStart(_) | selective::Prefilter::MemmemInner { .. } => {
+                    self.memmem_prefilter.as_ref()
+                        .and_then(|f| f.find(remaining))
+                        .map(|i| search_from + i)
+                }
+                selective::Prefilter::AhoCorasickStart(_) | selective::Prefilter::AhoCorasickInner { .. } => {
+                    self.ac_prefilter.as_ref()
+                        .and_then(|ac| ac.find(remaining))
+                        .map(|m| search_from + m.start())
+                }
+                _ => None,
+            };
+
+            let lit_pos = match lit_pos {
+                Some(p) => p,
+                None => break, // No more literal occurrences
+            };
+
+            // Calculate where to start trying the match
+            let try_pos = match &self.selective_prefilter {
+                selective::Prefilter::MemmemInner { min_prefix, .. }
+                | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => {
+                    lit_pos.saturating_sub(*min_prefix).max(start)
+                }
+                _ => lit_pos,
+            };
+
+            // Try matching at the candidate position
+            if let Some(m) = self.try_match_at(text, try_pos) {
                 return Some(m);
             }
-            if pos < text.len() {
-                pos += text[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-            } else {
-                break;
-            }
+
+            // Failed — skip past this literal occurrence to find the next one
+            search_from = lit_pos + 1;
         }
         None
     }
