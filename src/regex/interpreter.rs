@@ -246,8 +246,9 @@ pub enum ExecResult {
 // Execution Context
 // ============================================================================
 
-/// Maximum number of backtrack steps before giving up (prevents exponential blowup)
-const MAX_BACKTRACK_STEPS: usize = 1_000_000;
+/// Maximum number of backtrack steps before giving up (prevents exponential blowup).
+/// Set high enough for complex patterns on large haystacks, but prevents true catastrophic cases.
+const MAX_BACKTRACK_STEPS: usize = 5_000_000;
 
 pub struct ExecContext<'a> {
     input: &'a [u8],
@@ -1503,11 +1504,23 @@ fn is_line_terminator(c: u32) -> bool {
 #[inline(always)]
 fn to_lower_fast(c: u32) -> u32 {
     // ASCII fast path
-    if c >= b'A' as u32 && c <= b'Z' as u32 {
-        c + 32
-    } else {
-        c
+    if c < 128 {
+        if c >= b'A' as u32 && c <= b'Z' as u32 {
+            return c + 32;
+        }
+        return c;
     }
+    // Unicode case folding via Rust's char::to_lowercase
+    if let Some(ch) = char::from_u32(c) {
+        let mut lower = ch.to_lowercase();
+        if let Some(lc) = lower.next() {
+            // Only use simple (1:1) case folding
+            if lower.next().is_none() {
+                return lc as u32;
+            }
+        }
+    }
+    c
 }
 
 #[inline(always)]
@@ -1515,10 +1528,9 @@ fn char_eq_ignore_case_fast(a: u32, b: u32) -> bool {
     if a == b {
         return true;
     }
-    // Both must be ASCII letters for case folding to apply
     let a_lower = to_lower_fast(a);
     let b_lower = to_lower_fast(b);
-    a_lower == b_lower && a_lower >= b'a' as u32 && a_lower <= b'z' as u32
+    a_lower == b_lower
 }
 
 /// Check if slice matches another slice case-insensitively (ASCII only)

@@ -304,9 +304,13 @@ impl Parser {
                 Ok(Node::Literal(char::from_u32(code).unwrap()))
             }
             Some('u') => self.parse_unicode_escape(),
+            Some('p') | Some('P') => {
+                let negated = self.chars.get(self.pos - 1) == Some(&'P');
+                self.parse_unicode_property(negated)
+            }
             // Escaped special characters
             Some(c @ ('\\' | '/' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
-                    | '^' | '$' | '.' | '*' | '+' | '?')) => {
+                    | '^' | '$' | '.' | '*' | '+' | '?' | '-')) => {
                 Ok(Node::Literal(c))
             }
             // In non-unicode mode, other escaped chars are identity escapes
@@ -345,6 +349,50 @@ impl Parser {
             Ok(Node::Literal(char::from_u32(code)
                 .ok_or_else(|| CompilerError::new("invalid unicode codepoint"))?))
         }
+    }
+
+    /// Parse \p{...} or \P{...} Unicode property escapes
+    fn parse_unicode_property(&mut self, negated: bool) -> Result<Node> {
+        // \p{L}, \p{Letter}, \p{Lu}, \p{Nd}, \p{N}, \p{P}, etc.
+        let name = if self.peek() == Some('{') {
+            self.advance(); // consume '{'
+            let mut name = String::new();
+            while let Some(c) = self.peek() {
+                if c == '}' { self.advance(); break; }
+                name.push(c);
+                self.advance();
+            }
+            name
+        } else {
+            // Single char: \pL
+            match self.advance() {
+                Some(c) => c.to_string(),
+                None => return Err(CompilerError::new("incomplete unicode property")),
+            }
+        };
+
+        // Map common Unicode property names to character ranges
+        let ranges = match name.as_str() {
+            "L" | "Letter" => unicode_letter_ranges(),
+            "Lu" | "Uppercase_Letter" => vec![('A', 'Z'), ('\u{00C0}', '\u{00D6}'), ('\u{00D8}', '\u{00DE}'), ('\u{0100}', '\u{0100}')],
+            "Ll" | "Lowercase_Letter" => vec![('a', 'z'), ('\u{00DF}', '\u{00F6}'), ('\u{00F8}', '\u{00FF}')],
+            "N" | "Number" => vec![('0', '9'), ('\u{0660}', '\u{0669}'), ('\u{06F0}', '\u{06F9}')],
+            "Nd" | "Decimal_Number" => vec![('0', '9'), ('\u{0660}', '\u{0669}'), ('\u{06F0}', '\u{06F9}')],
+            "P" | "Punctuation" => vec![('!', '/'), (':', '@'), ('[', '`'), ('{', '~'), ('\u{00A1}', '\u{00BF}')],
+            "S" | "Symbol" => vec![('$', '$'), ('+', '+'), ('<', '>'), ('^', '^'), ('`', '`'), ('|', '|'), ('~', '~')],
+            "Z" | "Separator" => vec![(' ', ' '), ('\u{00A0}', '\u{00A0}'), ('\u{2000}', '\u{200A}')],
+            "Zs" | "Space_Separator" => vec![(' ', ' '), ('\u{00A0}', '\u{00A0}'), ('\u{2000}', '\u{200A}')],
+            "ASCII" => vec![('\0', '\x7F')],
+            _ => {
+                // Unknown property — try as a script name, fallback to broad match
+                vec![('\0', '\u{10FFFF}')]
+            }
+        };
+
+        let class_ranges: Vec<ClassRange> = ranges.into_iter()
+            .map(|(lo, hi)| ClassRange::Range(lo, hi))
+            .collect();
+        Ok(Node::Class { ranges: class_ranges, negated })
     }
 
     // ====================================================================
@@ -500,6 +548,43 @@ impl Parser {
                         }
                     }
                 }
+                // Inline flag groups: (?i:...), (?im:...), (?i), (?-i:...), etc.
+                Some(c) if c == 'i' || c == 'm' || c == 's' || c == 'u' || c == '-' => {
+                    // Parse flag chars
+                    let mut _flags_set = Vec::new();
+                    let mut _flags_clear = Vec::new();
+                    let mut clearing = false;
+                    while let Some(fc) = self.peek() {
+                        match fc {
+                            'i' | 'm' | 's' | 'u' | 'x' => {
+                                if clearing { _flags_clear.push(fc); } else { _flags_set.push(fc); }
+                                self.advance();
+                            }
+                            '-' => { clearing = true; self.advance(); }
+                            ':' | ')' => break,
+                            _ => break,
+                        }
+                    }
+                    match self.peek() {
+                        Some(':') => {
+                            // (?i:...) — scoped flags, parse as non-capturing group
+                            self.advance();
+                            let sub = self.parse_alternation()?;
+                            self.expect(')')?;
+                            Ok(Node::Group(Box::new(sub)))
+                        }
+                        Some(')') => {
+                            // (?i) — flag-only group, no content
+                            self.advance();
+                            Ok(Node::Empty)
+                        }
+                        _ => {
+                            Err(CompilerError::new(format!(
+                                "invalid group syntax at position {}", self.pos
+                            )))
+                        }
+                    }
+                }
                 _ => {
                     Err(CompilerError::new(format!(
                         "invalid group syntax at position {}", self.pos
@@ -539,6 +624,33 @@ impl Parser {
         }
         Err(CompilerError::new("unterminated group name"))
     }
+}
+
+/// Common Unicode letter ranges (covers Latin, Cyrillic, Greek, Arabic, CJK, etc.)
+fn unicode_letter_ranges() -> Vec<(char, char)> {
+    vec![
+        ('A', 'Z'), ('a', 'z'),
+        ('\u{00C0}', '\u{00D6}'), ('\u{00D8}', '\u{00F6}'), ('\u{00F8}', '\u{024F}'), // Latin Extended
+        ('\u{0370}', '\u{03FF}'), // Greek
+        ('\u{0400}', '\u{04FF}'), // Cyrillic
+        ('\u{0500}', '\u{052F}'), // Cyrillic Supplement
+        ('\u{0530}', '\u{058F}'), // Armenian
+        ('\u{0590}', '\u{05FF}'), // Hebrew
+        ('\u{0600}', '\u{06FF}'), // Arabic
+        ('\u{0900}', '\u{097F}'), // Devanagari
+        ('\u{0980}', '\u{09FF}'), // Bengali
+        ('\u{0E00}', '\u{0E7F}'), // Thai
+        ('\u{1000}', '\u{109F}'), // Myanmar
+        ('\u{1100}', '\u{11FF}'), // Hangul Jamo
+        ('\u{3040}', '\u{309F}'), // Hiragana
+        ('\u{30A0}', '\u{30FF}'), // Katakana
+        ('\u{3400}', '\u{4DBF}'), // CJK Unified Ideographs Extension A
+        ('\u{4E00}', '\u{9FFF}'), // CJK Unified Ideographs
+        ('\u{AC00}', '\u{D7AF}'), // Hangul Syllables
+        ('\u{F900}', '\u{FAFF}'), // CJK Compatibility Ideographs
+        ('\u{10000}', '\u{1007F}'), // Linear B Syllabary
+        ('\u{1F000}', '\u{1F02F}'), // Mahjong Tiles (symbols but often needed)
+    ]
 }
 
 #[cfg(test)]
