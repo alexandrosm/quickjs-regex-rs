@@ -119,6 +119,12 @@ impl CodeGenerator {
     // ========================================================================
 
     fn compile_class(&mut self, ranges: &[ClassRange], negated: bool) -> Result<()> {
+        // Optimization: detect [\s\S], [\d\D], [\w\W] — these match ANY character
+        if !negated && self.is_universal_class(ranges) {
+            self.builder.emit_op(OpCode::Any);
+            return Ok(());
+        }
+
         // Expand class ranges into (lo, hi) pairs, handling builtins
         let mut pairs: Vec<(u32, u32)> = Vec::new();
         let mut has_builtins = false;
@@ -153,8 +159,10 @@ impl CodeGenerator {
             pairs = neg_pairs;
         }
 
+        // Sort pairs by start value — interpreter uses binary search
+        pairs.sort_by_key(|p| p.0);
+
         if pairs.is_empty() {
-            // Empty class - never matches
             self.builder.emit_op_u16(OpCode::Char, 0xFFFF);
             return Ok(());
         }
@@ -472,7 +480,7 @@ impl CodeGenerator {
             (n, Some(m)) if n == m => { // {n}
                 for _ in 0..n { self.compile_node(sub)?; }
             }
-            (n, Some(m)) => { // {n,m}
+            (n, Some(m)) if m - n <= 5 => { // {n,m} small optional range — unroll
                 for _ in 0..n { self.compile_node(sub)?; }
                 for _ in n..m {
                     let split_op = if greedy { OpCode::SplitNextFirst } else { OpCode::SplitGotoFirst };
@@ -482,7 +490,26 @@ impl CodeGenerator {
                     self.builder.patch_goto(split_pc, end_pc);
                 }
             }
-            (n, None) => { // {n,}
+            (n, Some(m)) => { // {n,m} — use loop opcode for efficiency
+                // SET_I32 reg, max
+                let reg = self.alloc_register();
+                self.builder.emit_op(OpCode::SetI32);
+                self.builder.push(reg);
+                self.builder.push_u32(m);
+                // <body>
+                let body_start = self.builder.pc();
+                self.emit_save_reset(&captures);
+                self.compile_node(sub)?;
+                // LOOP_SPLIT reg, limit=(m-n), offset_to_body_start
+                let loop_op = if greedy { OpCode::LoopSplitGotoFirst } else { OpCode::LoopSplitNextFirst };
+                self.builder.emit_op(loop_op);
+                self.builder.push(reg);
+                self.builder.push_u32(m - n);
+                let offset_pos = self.builder.pc();
+                self.builder.push_u32(0); // placeholder offset
+                self.builder.patch_goto(offset_pos, body_start);
+            }
+            (n, None) if n <= 5 => { // {n,} small mandatory — unroll + loop
                 for _ in 0..n { self.compile_node(sub)?; }
                 let split_op = if greedy { OpCode::SplitNextFirst } else { OpCode::SplitGotoFirst };
                 let loop_start = self.builder.pc();
@@ -495,8 +522,48 @@ impl CodeGenerator {
                 let end_pc = self.builder.pc();
                 self.builder.patch_goto(split_pc, end_pc);
             }
+            (n, None) => { // {n,} large mandatory — use loop opcode
+                // SET_I32 reg, n (mandatory count, NO limit on optional)
+                let reg = self.alloc_register();
+                self.builder.emit_op(OpCode::SetI32);
+                self.builder.push(reg);
+                self.builder.push_u32(n);
+                // <body>
+                let body_start = self.builder.pc();
+                self.emit_save_reset(&captures);
+                self.compile_node(sub)?;
+                // LOOP_SPLIT reg, limit=0, offset_to_body_start
+                // When count > 0: must loop (mandatory). When count == 0: optional, keep looping with backtrack.
+                let loop_op = if greedy { OpCode::LoopSplitGotoFirst } else { OpCode::LoopSplitNextFirst };
+                self.builder.emit_op(loop_op);
+                self.builder.push(reg);
+                self.builder.push_u32(0);
+                let offset_pos = self.builder.pc();
+                self.builder.push_u32(0);
+                self.builder.patch_goto(offset_pos, body_start);
+            }
         }
         Ok(())
+    }
+
+    /// Allocate a register for loop counters.
+    fn alloc_register(&mut self) -> u8 {
+        let reg = self.register_count;
+        self.register_count += 1;
+        reg
+    }
+
+    /// Check if a character class is universal (matches any char): [\s\S], [\d\D], [\w\W]
+    fn is_universal_class(&self, ranges: &[ClassRange]) -> bool {
+        use BuiltinClass::*;
+        let builtins: Vec<BuiltinClass> = ranges.iter().filter_map(|r| match r {
+            ClassRange::Builtin(b) => Some(*b),
+            _ => None,
+        }).collect();
+        // Check for complementary pairs
+        (builtins.contains(&Space) && builtins.contains(&NotSpace))
+            || (builtins.contains(&Digit) && builtins.contains(&NotDigit))
+            || (builtins.contains(&Word) && builtins.contains(&NotWord))
     }
 
     /// Find all capture group indices inside a node.

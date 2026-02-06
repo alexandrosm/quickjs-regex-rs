@@ -39,9 +39,16 @@ pub type Result<T> = std::result::Result<T, CompilerError>;
 
 /// Compile a regex pattern to bytecode (pure Rust, full JS syntax)
 pub fn compile_regex(pattern: &str, flags: Flags) -> Result<Vec<u8>> {
-    let ast = parser::parse(pattern, flags)?;
-    let capture_count = parser::count_captures(pattern, flags)?;
-    let mut codegen = CodeGenerator::new(flags, capture_count);
+    // Detect inline flags (?i), (?m), (?s) anywhere in pattern and promote to global flags.
+    // This handles PCRE-style patterns like "(?i)foo|(?i)bar" where each branch uses (?i).
+    let mut final_flags = flags;
+    if pattern.contains("(?i") { final_flags.insert(Flags::IGNORE_CASE); }
+    if pattern.contains("(?m") { final_flags.insert(Flags::MULTILINE); }
+    if pattern.contains("(?s") { final_flags.insert(Flags::DOT_ALL); }
+
+    let ast = parser::parse(pattern, final_flags)?;
+    let capture_count = parser::count_captures(pattern, final_flags)?;
+    let mut codegen = CodeGenerator::new(final_flags, capture_count);
     codegen.compile(&ast)?;
     Ok(codegen.into_bytecode())
 }
@@ -287,5 +294,81 @@ mod tests {
     fn test_aws_keys_pattern() {
         let pattern = r"((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))";
         let _ = compile_regex(pattern, Flags::empty()).expect("compile failed");
+    }
+
+    #[test]
+    fn test_aws_keys_full_pattern() {
+        // Debug: test sub-patterns
+        let h = r#""AIDAABCDEFGHIJKLMNOP""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#;
+        assert!(compile_and_match(r#"('|")AIDA"#, Flags::empty(), h), "quote+AIDA");
+        assert!(compile_and_match(r"[A-Z0-7]{16}", Flags::empty(), "ABCDEFGHIJKLMNOP"), "16 chars");
+        assert!(compile_and_match(r#"[a-zA-Z0-9+/]{40}"#, Flags::empty(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "40 chars");
+        // First branch simplified
+        assert!(compile_and_match(
+            r#"('|")((?:AIDA)([A-Z0-7]{16}))('|").*?(('|")[a-zA-Z0-9+/]{40}('|"))+"#,
+            Flags::empty(), h), "first branch simplified");
+        // Full pattern
+        let pattern = r#"(('|")((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))('|").*?(\n^.*?){0,4}(('|")[a-zA-Z0-9+/]{40}('|"))+|('|")[a-zA-Z0-9+/]{40}('|").*?(\n^.*?){0,3}('|")((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))('|"))+"#;
+        assert!(compile_and_match(pattern, Flags::empty(), h),
+            "aws-keys full should match test haystack");
+    }
+
+    #[test]
+    fn test_bounded_repeat_context() {
+        // Progressively build up to full pattern
+        assert!(compile_and_match(r"a[\s\S]{0,5}b", Flags::empty(), "a12345b"), "a..b");
+        assert!(compile_and_match(r"a[\s\S]{0,10}b", Flags::empty(), "a1234567890b"), "a..10..b");
+        assert!(compile_and_match(r"a[\s\S]{0,20}Result", Flags::empty(), "a blah blah Result"), "a..Result");
+        // Full pattern
+        let pattern = r"[A-Za-z]{10}\s+[\s\S]{0,100}Result[\s\S]{0,100}\s+[A-Za-z]{10}";
+        let haystack = "abcdefghij blah blah blah Result blib blab klmnopqrst";
+        assert!(compile_and_match(pattern, Flags::empty(), haystack),
+            "context pattern should match test haystack");
+    }
+
+    #[test]
+    fn test_noseyparker_inline_flags() {
+        let pattern = r"(?i)\b(p8e-[a-z0-9-]{32})(?:[^a-z0-9-]|$)";
+        let _ = compile_regex(pattern, Flags::empty()).expect("noseyparker compile failed");
+    }
+
+    #[test]
+    fn test_unstructured_to_json() {
+        let pattern = r"^([^ ]+ [^ ]+) ([DIWEF])[1234]: ((?:(?:\[[^\]]*?\]|\([^\)]*?\)): )*)(.*?) \{([^\}]*)\}$";
+        let bytecode = compile_regex(pattern, Flags::empty()).expect("unstructured compile failed");
+        let text = r#"2023-01-15 12:34:56 I1: [module]: hello {key=value}"#;
+        let mut ctx = ExecContext::new(&bytecode, text.as_bytes());
+        let result = ctx.exec(0);
+        assert!(matches!(result, ExecResult::Match), "Should match log line");
+    }
+
+    #[test]
+    fn test_char_class_s_S() {
+        // [\s\S] should match ANY character (like dotall)
+        assert!(compile_and_match("[\\s\\S]", Flags::empty(), "a"));
+        assert!(compile_and_match("[\\s\\S]", Flags::empty(), " "));
+        assert!(compile_and_match("[\\s\\S]", Flags::empty(), "\n"));
+    }
+
+    #[test]
+    fn test_negated_class_newline() {
+        // [^\n] should match anything except newline
+        assert!(compile_and_match("[^\\n]", Flags::empty(), "a"));
+        assert!(!compile_and_match("^[^\\n]$", Flags::empty(), "\n"));
+    }
+
+    #[test]
+    fn test_inline_flag_group() {
+        // (?i) should enable case-insensitive for the rest
+        assert!(compile_and_match("(?i)hello", Flags::empty(), "HELLO"));
+        assert!(compile_and_match("(?i:hello)", Flags::empty(), "HELLO"));
+    }
+
+    #[test]
+    fn test_newline_in_class_with_caret() {
+        // (\n^.*?) - newline followed by start-of-line
+        let flags = Flags::from_bits(Flags::MULTILINE);
+        assert!(compile_and_match("\\n^test", flags, "line1\ntest"));
     }
 }
