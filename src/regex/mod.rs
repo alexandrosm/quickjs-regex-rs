@@ -1370,15 +1370,6 @@ impl Regex {
 
         if self.use_pike_vm {
             let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-
-            // For large inputs: use fast capture-free scan first (with DFA cache)
-            if text_bytes.len() > 1024 {
-                if vm.find_match(pos).is_none() {
-                    return None; // No match anywhere — fast rejection
-                }
-            }
-
-            // Full execution for match span extraction
             match vm.exec(pos) {
                 pikevm::PikeResult::Match(caps) => {
                     let start = caps.get(0).copied().flatten()?;
@@ -1866,15 +1857,12 @@ impl Regex {
     pub fn count_matches(&self, text: &str) -> usize {
         match &self.strategy {
             SearchStrategy::AlternationLiterals { ac, .. } => {
-                // Use AC's native find_iter which maintains state efficiently
                 ac.find_iter(text.as_bytes()).count()
             }
             SearchStrategy::PureLiteral(finder) => {
-                // Use memmem's native find_iter
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
-                // Fall back to find_iter for other strategies
                 self.find_iter(text).count()
             }
         }
