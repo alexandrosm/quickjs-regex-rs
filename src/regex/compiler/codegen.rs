@@ -509,8 +509,27 @@ impl CodeGenerator {
                 self.builder.push_u32(0); // placeholder offset
                 self.builder.patch_goto(offset_pos, body_start);
             }
-            (n, None) if n <= 5 => { // {n,} small mandatory — unroll + loop
-                for _ in 0..n { self.compile_node(sub)?; }
+            (n, None) => { // {n,} — use loop for mandatory part + SPLIT loop for optional
+                if n > 0 {
+                    // Use loop opcode for mandatory iterations
+                    let reg = self.alloc_register();
+                    self.builder.emit_op(OpCode::SetI32);
+                    self.builder.push(reg);
+                    self.builder.push_u32(n);
+                    let body_start = self.builder.pc();
+                    self.emit_save_reset(&captures);
+                    self.compile_node(sub)?;
+                    // LOOP_SPLIT with limit=0: all iterations mandatory (count > 0 → must loop)
+                    // When count reaches 0, fall through to optional loop below
+                    let loop_op = if greedy { OpCode::LoopSplitGotoFirst } else { OpCode::LoopSplitNextFirst };
+                    self.builder.emit_op(loop_op);
+                    self.builder.push(reg);
+                    self.builder.push_u32(0); // limit=0 means ALL are mandatory
+                    let offset_pos = self.builder.pc();
+                    self.builder.push_u32(0);
+                    self.builder.patch_goto(offset_pos, body_start);
+                }
+                // Optional unbounded loop (the * after mandatory part)
                 let split_op = if greedy { OpCode::SplitNextFirst } else { OpCode::SplitGotoFirst };
                 let loop_start = self.builder.pc();
                 let split_pc = self.builder.emit_goto(split_op, 0);
@@ -521,26 +540,6 @@ impl CodeGenerator {
                 self.builder.patch_goto(goto_pc + 1, loop_start);
                 let end_pc = self.builder.pc();
                 self.builder.patch_goto(split_pc, end_pc);
-            }
-            (n, None) => { // {n,} large mandatory — use loop opcode
-                // SET_I32 reg, n (mandatory count, NO limit on optional)
-                let reg = self.alloc_register();
-                self.builder.emit_op(OpCode::SetI32);
-                self.builder.push(reg);
-                self.builder.push_u32(n);
-                // <body>
-                let body_start = self.builder.pc();
-                self.emit_save_reset(&captures);
-                self.compile_node(sub)?;
-                // LOOP_SPLIT reg, limit=0, offset_to_body_start
-                // When count > 0: must loop (mandatory). When count == 0: optional, keep looping with backtrack.
-                let loop_op = if greedy { OpCode::LoopSplitGotoFirst } else { OpCode::LoopSplitNextFirst };
-                self.builder.emit_op(loop_op);
-                self.builder.push(reg);
-                self.builder.push_u32(0);
-                let offset_pos = self.builder.pc();
-                self.builder.push_u32(0);
-                self.builder.patch_goto(offset_pos, body_start);
             }
         }
         Ok(())

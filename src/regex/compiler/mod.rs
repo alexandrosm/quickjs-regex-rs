@@ -359,6 +359,16 @@ mod tests {
     }
 
     #[test]
+    fn test_large_bounded_repeat() {
+        // {12,} must match 12+ characters
+        assert!(compile_and_match(r"\b[A-Za-z0-9_]{12,}\b", Flags::empty(), "abcdefghijklmnop"));
+        assert!(!compile_and_match(r"^\b[A-Za-z0-9_]{12,}\b$", Flags::empty(), "short"));
+        // {8,13} bounded
+        assert!(compile_and_match("[A-Za-z]{8,13}", Flags::empty(), "abcdefghij"));
+        assert!(!compile_and_match("^[A-Za-z]{8,13}$", Flags::empty(), "short"));
+    }
+
+    #[test]
     fn test_inline_flag_group() {
         // (?i) should enable case-insensitive for the rest
         assert!(compile_and_match("(?i)hello", Flags::empty(), "HELLO"));
