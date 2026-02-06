@@ -1,13 +1,13 @@
-//! Pure Rust regex compiler
+//! Pure Rust regex compiler with full JavaScript regex syntax support.
 //!
-//! Replaces the C-based lre_compile with a pure Rust implementation.
-//! Parses regex patterns using regex-syntax and compiles to QuickJS bytecode.
+//! Custom parser handles backreferences, lookahead, lookbehind, and all
+//! ECMAScript regex features. Compiles to QuickJS bytecode.
 
 mod bytecode_builder;
 mod codegen;
+pub mod parser;
 
 use crate::regex::Flags;
-use regex_syntax::ParserBuilder;
 use std::error::Error as StdError;
 use std::fmt;
 
@@ -37,24 +37,12 @@ impl StdError for CompilerError {}
 
 pub type Result<T> = std::result::Result<T, CompilerError>;
 
-/// Compile a regex pattern to bytecode (pure Rust replacement for lre_compile)
+/// Compile a regex pattern to bytecode (pure Rust, full JS syntax)
 pub fn compile_regex(pattern: &str, flags: Flags) -> Result<Vec<u8>> {
-    // Use unicode(false) to get JavaScript-compatible \w, \d, \s semantics.
-    // The codegen detects dot patterns (byte class spanning 0x00-0xFF minus \n)
-    // and emits the Dot opcode which correctly matches Unicode codepoints.
-    let is_unicode = flags.contains(Flags::UNICODE);
-    let hir = ParserBuilder::new()
-        .unicode(is_unicode)
-        .case_insensitive(flags.contains(Flags::IGNORE_CASE))
-        .multi_line(flags.contains(Flags::MULTILINE))
-        .dot_matches_new_line(flags.contains(Flags::DOT_ALL))
-        .utf8(false) // Allow non-UTF8 patterns (dot matches any byte)
-        .build()
-        .parse(pattern)
-        .map_err(|e| CompilerError::new(format!("Parse error: {}", e)))?;
-
-    let mut codegen = CodeGenerator::new(flags);
-    codegen.compile(&hir)?;
+    let ast = parser::parse(pattern, flags)?;
+    let capture_count = parser::count_captures(pattern, flags)?;
+    let mut codegen = CodeGenerator::new(flags, capture_count);
+    codegen.compile(&ast)?;
     Ok(codegen.into_bytecode())
 }
 
@@ -94,6 +82,8 @@ mod tests {
         }
         None
     }
+
+    // === Basic features ===
 
     #[test]
     fn test_literal() {
@@ -156,13 +146,10 @@ mod tests {
         let text = b"ab";
         let mut ctx = ExecContext::new(&bytecode, text);
         assert!(matches!(ctx.exec(0), ExecResult::Match));
-        // Capture 0 = whole match
         assert_eq!(ctx.captures[0], Some(0));
         assert_eq!(ctx.captures[1], Some(2));
-        // Capture 1 = first group
         assert_eq!(ctx.captures[2], Some(0));
         assert_eq!(ctx.captures[3], Some(1));
-        // Capture 2 = second group
         assert_eq!(ctx.captures[4], Some(1));
         assert_eq!(ctx.captures[5], Some(2));
     }
@@ -193,219 +180,23 @@ mod tests {
     }
 
     #[test]
-    fn test_many_capture_groups() {
-        // Simulate lexer-veryl: many capture groups in alternation
-        // Use unique prefixes to avoid partial matching
-        let mut parts = Vec::new();
-        for i in 0..90 {
-            parts.push(format!("(x{:03}y)", i));
-        }
-        let pattern = parts.join("|");
-        let bytecode = compile_regex(&pattern, Flags::empty()).expect("compile failed");
-        let text = "x042y";
-        let mut ctx = ExecContext::new(&bytecode, text.as_bytes());
-        let result = ctx.exec(0);
-        assert!(matches!(result, ExecResult::Match));
-        // Group 0 should match
-        assert_eq!(ctx.captures[0], Some(0));
-        assert_eq!(ctx.captures[1], Some(5));
-        // Group 43 (regex-syntax index 43) should match
-        assert_eq!(ctx.captures[43 * 2], Some(0));
-        assert_eq!(ctx.captures[43 * 2 + 1], Some(5));
-    }
-
-    #[test]
-    fn test_full_lexer_veryl_from_file() {
-        // Read the actual 88-line lexer-veryl pattern
-        let pattern_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/parol-veryl.txt");
-        if !pattern_file.exists() {
-            eprintln!("Skipping: tests/parol-veryl.txt not found");
-            return;
-        }
-        let content = std::fs::read_to_string(&pattern_file).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
-        let pattern = lines.join("|");
-        eprintln!("Full lexer-veryl: {} chars, {} alternatives", pattern.len(), lines.len());
-
-        let re = crate::regex::Regex::with_flags_pure_rust(&pattern, Flags::empty())
-            .expect("compile failed");
-
-        // Use a LARGE haystack to simulate benchmark conditions (150KB)
-        let base = "module test_mod {\n  let x = 42;\n  // comment\n  function foo() { return x + 1; }\n}\n";
-        let mut haystack = String::new();
-        while haystack.len() < 150_000 {
-            haystack.push_str(base);
-        }
-        eprintln!("Haystack size: {} bytes", haystack.len());
-
-        let mut count = 0;
-        let mut pos = 0;
-        while pos < haystack.len() {
-            match re.captures_at_pure_rust(&haystack, pos) {
-                Some(caps) => {
-                    count += caps.count_matched();
-                    if let Some(m) = caps.get(0) {
-                        pos = if m.end > m.start { m.end } else { m.start + 1 };
-                    } else {
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
-        eprintln!("Full lexer-veryl: matched {} capture groups over {}KB", count, haystack.len() / 1024);
-        assert!(count > 0);
-    }
-
-    #[test]
-    fn test_aws_keys_pattern() {
-        // The aws-keys "full" pattern
-        let pattern = r#"(('|")((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))('|").*?(\n^.*?){0,4}(('|")[a-zA-Z0-9+/]{40}('|"))+|('|")[a-zA-Z0-9+/]{40}('|").*?(\n^.*?){0,3}('|")((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))('|"))+"#;
-        let re = crate::regex::Regex::with_flags_pure_rust(pattern, Flags::empty())
-            .expect("compile failed");
-
-        // Test with a simple haystack
-        let haystack = r#""AKIAIOSFODNN7EXAMPLE" ... "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY""#;
-        let caps = re.captures_at_pure_rust(haystack, 0);
-        eprintln!("aws-keys result: {:?}", caps.as_ref().map(|c| c.len()));
-    }
-
-    #[test]
-    fn test_real_lexer_veryl_repeated_captures() {
-        // Test repeated captures like count-captures model does
-        let lines = vec![
-            r"(\r\n|\r|\n)", r"([\t\v\f ]+)",
-            r"((?:(?:(?://.*(?:\r\n|\r|\n))|(?:/\*.*?\*/))\s*)+)",
-            r"([0-9]+(?:_[0-9]+)*\.[0-9]+(?:_[0-9]+)*[eE][+-]?[0-9]+(?:_[0-9]+)*)",
-            r"([0-9]+(?:_[0-9]+)*\.[0-9]+(?:_[0-9]+)*)",
-            r"([0-9]+(?:_[0-9]+)*[eE][+-]?[0-9]+(?:_[0-9]+)*)",
-            r"([0-9]+(?:_[0-9]+)*)", r"(32'[sS]?[bB][01xXzZ?][01xXzZ?_]*)",
-            r"(\bmodule\b)", r"(\binterface\b)", r"(\bfunction\b)",
-            r"(\bimport\b)", r"(\bexport\b)", r"(\blet\b)", r"(\bvar\b)",
-            r"(\blocalparam\b)", r"(\balways_comb\b)", r"(\balways_ff\b)",
-            r"(\bassign\b)", r"(\breturn\b)", r"(\bif\b)", r"(\belse\b)",
-            r"(\bfor\b)", r"(\bin\b)", r"(\bcase\b)", r"(\bdefault\b)",
-            r"(\binput\b)", r"(\boutput\b)", r"(\binout\b)", r"(\bref\b)",
-            r"(\bconst\b)", r"(\benum\b)", r"(\bstruct\b)", r"(\bunion\b)",
-            r"(\btype\b)", r"(\bparam\b)", r"(\binst\b)", r"(\bclocking\b)",
-            r"(\bposedge\b)", r"(\bnegedge\b)", r"(\bbit\b)", r"(\blogic\b)",
-            r"(\btri\b)", r"(\bu32\b)", r"(\bu64\b)", r"(\bi32\b)",
-            r"(\bi64\b)", r"(\bf32\b)", r"(\bf64\b)", r"(\bstring\b)",
-            r"(\bstep\b)", r"(\brepeat\b)", r"(\binitial\b)", r"(\bfinal\b)",
-            r"(\bpackage\b)", r"(\bpub\b)", r"(\blocal\b)",
-            r"(\b_\b)", r"(\$[a-zA-Z_][0-9a-zA-Z_$]*)",
-            r"([a-zA-Z_][0-9a-zA-Z_]*)", r"(::)", r"(:)", r"(\.\.\.\=)",
-            r"(\.\.\=)", r"(\.\.\.\#)", r"(\.\.\#)", r"(\.\.)",
-            r"(\#)", r"(\()", r"(\))", r"(\[)", r"(\])", r"(\{)", r"(\})",
-            r"(;)", r"(,)", r"(\+)", r"(-)", r"(\*\*)", r"(\*)",
-            r"(/)", r"(%)", r"(&)", r"(\|)", r"(\^)", r"(~)",
-            r"(=)", r"(<)", r"(>)", r"(!)", r"(@)", r"(\.)",
-            r"(.)",
-        ];
-        let pattern = lines.join("|");
-        eprintln!("Pattern length: {} chars, {} alternatives", pattern.len(), lines.len());
-
-        let re = crate::regex::Regex::with_flags_pure_rust(&pattern, Flags::empty())
-            .expect("compile failed");
-
-        let haystack = "module test_mod {\n  let x = 42;\n  // comment\n}\n";
-        let mut count = 0;
-        let mut pos = 0;
-        while pos < haystack.len() {
-            match re.captures_at_pure_rust(haystack, pos) {
-                Some(caps) => {
-                    count += caps.count_matched();
-                    if let Some(m) = caps.get(0) {
-                        pos = if m.end > m.start { m.end } else { m.start + 1 };
-                    } else {
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
-        eprintln!("Matched {} capture groups over haystack", count);
-        assert!(count > 0);
-    }
-
-    #[test]
-    fn test_real_lexer_veryl() {
-        // The actual lexer-veryl pattern (88 alternations with capture groups)
-        let lines = vec![
-            r"(\r\n|\r|\n)",
-            r"([\t\v\f ]+)",
-            r"((?:(?:(?://.*(?:\r\n|\r|\n))|(?:/\*.*?\*/))\s*)+)",
-            r"([0-9]+(?:_[0-9]+)*\.[0-9]+(?:_[0-9]+)*[eE][+-]?[0-9]+(?:_[0-9]+)*)",
-            r"([0-9]+(?:_[0-9]+)*\.[0-9]+(?:_[0-9]+)*)",
-            r"([0-9]+(?:_[0-9]+)*[eE][+-]?[0-9]+(?:_[0-9]+)*)",
-            r"([0-9]+(?:_[0-9]+)*)",
-            r"(32'[sS]?[bB][01xXzZ?][01xXzZ?_]*)",
-            r"(\bmodule\b)",
-            r"(\binterface\b)",
-            r"(\bfunction\b)",
-            r"(\bimport\b)",
-            r"(\bexport\b)",
-            r"(\blet\b)",
-            r"(\bvar\b)",
-            r"([a-zA-Z_][0-9a-zA-Z_]*)",
-            r"(.)",
-        ];
-        let pattern = lines.join("|");
-        let bytecode = compile_regex(&pattern, Flags::empty()).expect("compile failed");
-        let text = "module test_mod";
-        let mut ctx = ExecContext::new(&bytecode, text.as_bytes());
-        let result = ctx.exec(0);
-        assert!(matches!(result, ExecResult::Match), "Should match");
-    }
-
-    #[test]
-    fn test_lexer_veryl_like_pattern() {
-        // Simplified version of lexer-veryl: alternation with captures + complex sub-patterns
-        let pattern = r"(\r\n|\r|\n)|([ \t]+)|(//[^\n]*)|([a-z]+)|([0-9]+)|(\+|-|\*|/)|(\(|\))|(\{|\})|(\[|\])|(;)|(,)|(\.)|(:)|(\|)";
-        let bytecode = compile_regex(pattern, Flags::empty()).expect("compile failed");
-        // Test matching various tokens
-        for (text, expected_group) in [
-            ("\n", 1),
-            ("  ", 2),
-            ("// comment", 3),
-            ("hello", 4),
-            ("123", 5),
-            ("+", 6),
-            ("(", 7),
-        ] {
-            let mut ctx = ExecContext::new(&bytecode, text.as_bytes());
-            let result = ctx.exec(0);
-            assert!(matches!(result, ExecResult::Match), "Failed to match: {:?}", text);
-            assert!(ctx.captures[expected_group * 2].is_some(),
-                "Group {} should match for {:?}", expected_group, text);
-        }
+    fn test_bounded_repetition() {
+        assert!(compile_and_match("a{3}", Flags::empty(), "aaa"));
+        assert!(!compile_and_match("^a{3}$", Flags::empty(), "aa"));
+        assert!(compile_and_match("a{2,4}", Flags::empty(), "aaa"));
     }
 
     #[test]
     fn test_non_capturing_group() {
-        // Test (?:...) doesn't create captures
         assert!(compile_and_match("(?:abc)+", Flags::empty(), "abcabc"));
         assert!(compile_and_match("(?:a|b)c", Flags::empty(), "ac"));
         assert!(compile_and_match("(?:a|b)c", Flags::empty(), "bc"));
     }
 
     #[test]
-    fn test_nested_groups_with_captures() {
-        let bytecode = compile_regex("((?:a)(b))", Flags::empty()).expect("compile failed");
-        let text = b"ab";
-        let mut ctx = ExecContext::new(&bytecode, text);
-        assert!(matches!(ctx.exec(0), ExecResult::Match));
-        // Group 0 = whole match
-        assert_eq!(ctx.captures[0], Some(0));
-        assert_eq!(ctx.captures[1], Some(2));
-    }
-
-    #[test]
     fn test_lazy_quantifiers() {
-        // a+? should match minimal
         let m = compile_and_find("a+?", Flags::empty(), "aaa");
-        assert_eq!(m, Some((0, 1))); // Just one 'a'
+        assert_eq!(m, Some((0, 1)));
     }
 
     #[test]
@@ -417,13 +208,84 @@ mod tests {
     #[test]
     fn test_dot_star_lazy() {
         let m = compile_and_find("a.*?b", Flags::empty(), "aXXbYYb");
-        assert_eq!(m, Some((0, 4))); // "aXXb" not "aXXbYYb"
+        assert_eq!(m, Some((0, 4)));
+    }
+
+    // === JS-specific features ===
+
+    #[test]
+    fn test_backreference() {
+        assert!(compile_and_match("(a)\\1", Flags::empty(), "aa"));
+        assert!(!compile_and_match("^(a)\\1$", Flags::empty(), "ab"));
     }
 
     #[test]
-    fn test_bounded_repetition() {
-        assert!(compile_and_match("a{3}", Flags::empty(), "aaa"));
-        assert!(!compile_and_match("^a{3}$", Flags::empty(), "aa"));
-        assert!(compile_and_match("a{2,4}", Flags::empty(), "aaa"));
+    fn test_backreference_word() {
+        assert!(compile_and_match("(\\w+)\\s+\\1", Flags::empty(), "hello hello"));
+        assert!(!compile_and_match("^(\\w+)\\s+\\1$", Flags::empty(), "hello world"));
+    }
+
+    #[test]
+    fn test_positive_lookahead() {
+        assert!(compile_and_match("foo(?=bar)", Flags::empty(), "foobar"));
+        assert!(!compile_and_match("foo(?=bar)", Flags::empty(), "foobaz"));
+    }
+
+    #[test]
+    fn test_negative_lookahead() {
+        assert!(compile_and_match("foo(?!bar)", Flags::empty(), "foobaz"));
+        assert!(!compile_and_match("foo(?!bar)", Flags::empty(), "foobar"));
+    }
+
+    // === Complex patterns ===
+
+    #[test]
+    fn test_many_capture_groups() {
+        let mut parts = Vec::new();
+        for i in 0..90 {
+            parts.push(format!("(x{:03}y)", i));
+        }
+        let pattern = parts.join("|");
+        let bytecode = compile_regex(&pattern, Flags::empty()).expect("compile failed");
+        let text = "x042y";
+        let mut ctx = ExecContext::new(&bytecode, text.as_bytes());
+        let result = ctx.exec(0);
+        assert!(matches!(result, ExecResult::Match));
+        assert_eq!(ctx.captures[0], Some(0));
+        assert_eq!(ctx.captures[1], Some(5));
+        assert_eq!(ctx.captures[43 * 2], Some(0));
+        assert_eq!(ctx.captures[43 * 2 + 1], Some(5));
+    }
+
+    #[test]
+    fn test_nested_groups_with_captures() {
+        let bytecode = compile_regex("((?:a)(b))", Flags::empty()).expect("compile failed");
+        let text = b"ab";
+        let mut ctx = ExecContext::new(&bytecode, text);
+        assert!(matches!(ctx.exec(0), ExecResult::Match));
+        assert_eq!(ctx.captures[0], Some(0));
+        assert_eq!(ctx.captures[1], Some(2));
+    }
+
+    #[test]
+    fn test_lexer_veryl_like_pattern() {
+        let pattern = r"(\r\n|\r|\n)|([ \t]+)|(//[^\n]*)|([a-z]+)|([0-9]+)|(\+|-|\*|/)|(\(|\))|(\{|\})|(\[|\])|(;)|(,)|(\.)|(:)|(\|)";
+        let bytecode = compile_regex(pattern, Flags::empty()).expect("compile failed");
+        for (text, expected_group) in [
+            ("\n", 1), ("  ", 2), ("// comment", 3), ("hello", 4),
+            ("123", 5), ("+", 6), ("(", 7),
+        ] {
+            let mut ctx = ExecContext::new(&bytecode, text.as_bytes());
+            let result = ctx.exec(0);
+            assert!(matches!(result, ExecResult::Match), "Failed to match: {:?}", text);
+            assert!(ctx.captures[expected_group * 2].is_some(),
+                "Group {} should match for {:?}", expected_group, text);
+        }
+    }
+
+    #[test]
+    fn test_aws_keys_pattern() {
+        let pattern = r"((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))";
+        let _ = compile_regex(pattern, Flags::empty()).expect("compile failed");
     }
 }

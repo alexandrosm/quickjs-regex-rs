@@ -8,12 +8,12 @@ keywords = ["regex", "javascript", "ecmascript"]
 categories = ["text-processing"]
 
 [dependencies]
-# Core dependencies (temporary - will be eliminated during refinement)
+# Legacy C engine modules (only used for benchmark comparison via find_at_c_engine)
 c2rust-bitfields = "0.21"
 libc = "0.2"
+# Search optimization
 memchr = "2"
 aho-corasick = "1"
-regex-syntax = "0.8"
 
 [dev-dependencies]
 regex = "1"

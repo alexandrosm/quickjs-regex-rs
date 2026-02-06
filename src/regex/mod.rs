@@ -3499,7 +3499,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Backreferences not supported by regex-syntax parser
     fn test_backreference() {
         let re = Regex::new(r"(a)\1").unwrap();
         assert!(re.is_match("aa"));
