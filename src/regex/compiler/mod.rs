@@ -212,6 +212,63 @@ mod tests {
     }
 
     #[test]
+    fn test_full_lexer_veryl_from_file() {
+        // Read the actual 88-line lexer-veryl pattern
+        let pattern_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/parol-veryl.txt");
+        if !pattern_file.exists() {
+            eprintln!("Skipping: tests/parol-veryl.txt not found");
+            return;
+        }
+        let content = std::fs::read_to_string(&pattern_file).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        let pattern = lines.join("|");
+        eprintln!("Full lexer-veryl: {} chars, {} alternatives", pattern.len(), lines.len());
+
+        let re = crate::regex::Regex::with_flags_pure_rust(&pattern, Flags::empty())
+            .expect("compile failed");
+
+        // Use a LARGE haystack to simulate benchmark conditions (150KB)
+        let base = "module test_mod {\n  let x = 42;\n  // comment\n  function foo() { return x + 1; }\n}\n";
+        let mut haystack = String::new();
+        while haystack.len() < 150_000 {
+            haystack.push_str(base);
+        }
+        eprintln!("Haystack size: {} bytes", haystack.len());
+
+        let mut count = 0;
+        let mut pos = 0;
+        while pos < haystack.len() {
+            match re.captures_at_pure_rust(&haystack, pos) {
+                Some(caps) => {
+                    count += caps.count_matched();
+                    if let Some(m) = caps.get(0) {
+                        pos = if m.end > m.start { m.end } else { m.start + 1 };
+                    } else {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        eprintln!("Full lexer-veryl: matched {} capture groups over {}KB", count, haystack.len() / 1024);
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn test_aws_keys_pattern() {
+        // The aws-keys "full" pattern
+        let pattern = r#"(('|")((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))('|").*?(\n^.*?){0,4}(('|")[a-zA-Z0-9+/]{40}('|"))+|('|")[a-zA-Z0-9+/]{40}('|").*?(\n^.*?){0,3}('|")((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))('|"))+"#;
+        let re = crate::regex::Regex::with_flags_pure_rust(pattern, Flags::empty())
+            .expect("compile failed");
+
+        // Test with a simple haystack
+        let haystack = r#""AKIAIOSFODNN7EXAMPLE" ... "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY""#;
+        let caps = re.captures_at_pure_rust(haystack, 0);
+        eprintln!("aws-keys result: {:?}", caps.as_ref().map(|c| c.len()));
+    }
+
+    #[test]
     fn test_real_lexer_veryl_repeated_captures() {
         // Test repeated captures like count-captures model does
         let lines = vec![

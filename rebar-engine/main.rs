@@ -148,6 +148,8 @@ fn model_count_captures(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
+    eprintln!("count-captures: mode={:?}, haystack_len={}, capture_count={}",
+        mode, haystack.len(), re.capture_count());
     timer::run(b, || {
         let mut count = 0;
         let mut pos = 0;
