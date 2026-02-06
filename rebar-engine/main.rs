@@ -48,11 +48,11 @@ fn main() -> anyhow::Result<()> {
         .context("failed to read KLV data from <stdin>")?;
     let samples = match b.model.as_str() {
         "compile" => model_compile(&b, mode)?,
-        "count" => model_count(&b, &compile(&b)?, mode)?,
-        "count-spans" => model_count_spans(&b, &compile(&b)?, mode)?,
-        "count-captures" => model_count_captures(&b, &compile(&b)?, mode)?,
-        "grep" => model_grep(&b, &compile(&b)?, mode)?,
-        "grep-captures" => model_grep_captures(&b, &compile(&b)?, mode)?,
+        "count" => model_count(&b, &compile_with_mode(&b, mode)?, mode)?,
+        "count-spans" => model_count_spans(&b, &compile_with_mode(&b, mode)?, mode)?,
+        "count-captures" => model_count_captures(&b, &compile_with_mode(&b, mode)?, mode)?,
+        "grep" => model_grep(&b, &compile_with_mode(&b, mode)?, mode)?,
+        "grep-captures" => model_grep_captures(&b, &compile_with_mode(&b, mode)?, mode)?,
         _ => anyhow::bail!("unrecognized benchmark model '{}'", b.model),
     };
     if !quiet {
@@ -93,7 +93,7 @@ fn model_compile(b: &klv::Benchmark, mode: Mode) -> anyhow::Result<Vec<timer::Sa
     timer::run_and_count(
         b,
         |re: Regex| Ok(find_all(&re, haystack, mode)),
-        || compile(b),
+        || compile_with_mode(b, mode),
     )
 }
 
@@ -246,6 +246,10 @@ fn model_grep_captures(
 }
 
 fn compile(b: &klv::Benchmark) -> anyhow::Result<Regex> {
+    compile_with_mode(b, Mode::Hybrid)
+}
+
+fn compile_with_mode(b: &klv::Benchmark, mode: Mode) -> anyhow::Result<Regex> {
     let pattern = b.regex.one()?;
     let mut flags = Flags::empty();
     if b.regex.case_insensitive {
@@ -254,5 +258,8 @@ fn compile(b: &klv::Benchmark) -> anyhow::Result<Regex> {
     if b.regex.unicode {
         flags.insert(Flags::UNICODE);
     }
-    Ok(Regex::with_flags(&pattern, flags)?)
+    match mode {
+        Mode::PureRust => Ok(Regex::with_flags_pure_rust(&pattern, flags)?),
+        _ => Ok(Regex::with_flags(&pattern, flags)?),
+    }
 }

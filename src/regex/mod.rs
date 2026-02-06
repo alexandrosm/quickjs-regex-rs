@@ -27,6 +27,9 @@ pub(crate) mod engine;
 // Clean Rust interpreter (experimental)
 mod interpreter;
 
+// Pure Rust compiler (experimental)
+mod compiler;
+
 pub use opcodes::OpCode;
 pub use flags::{Flags, InvalidFlag};
 pub use error::{Error, Result, ExecResult};
@@ -737,7 +740,7 @@ impl std::fmt::Debug for SearchStrategy {
 
 /// A compiled regular expression
 pub struct Regex {
-    /// The compiled bytecode (heap-allocated)
+    /// The compiled bytecode (heap-allocated by C or Rust)
     bytecode: *mut u8,
     /// The original pattern (for Display)
     pattern: String,
@@ -745,6 +748,9 @@ pub struct Regex {
     flags: Flags,
     /// Optimized search strategy
     strategy: SearchStrategy,
+    /// Rust-owned bytecode (when compiled by pure Rust compiler).
+    /// When Some, bytecode ptr points into this Vec.
+    owned_bytecode: Option<Vec<u8>>,
 }
 
 // Regex is Send + Sync since the bytecode is immutable after compilation
@@ -813,6 +819,28 @@ impl Regex {
             pattern: pattern.to_string(),
             flags: final_flags,
             strategy,
+            owned_bytecode: None,
+        })
+    }
+
+    /// Compile using pure Rust compiler (no C code)
+    pub fn with_flags_pure_rust(pattern: &str, flags: Flags) -> Result<Self> {
+        let (processed_pattern, extracted_flags) = extract_inline_flags(pattern);
+        let mut final_flags = flags;
+        final_flags.insert(extracted_flags.bits());
+
+        let mut bytecode_vec = compiler::compile_regex(&processed_pattern, final_flags)
+            .map_err(|e| Error::Syntax(e.to_string()))?;
+
+        let bytecode_ptr = bytecode_vec.as_mut_ptr();
+        let strategy = analyze_pattern(&processed_pattern, final_flags);
+
+        Ok(Regex {
+            bytecode: bytecode_ptr,
+            pattern: pattern.to_string(),
+            flags: final_flags,
+            strategy,
+            owned_bytecode: Some(bytecode_vec),
         })
     }
 
