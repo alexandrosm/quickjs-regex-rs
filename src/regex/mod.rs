@@ -821,8 +821,9 @@ impl Regex {
             | selective::Prefilter::MemmemInner { needle, .. }
                 if needle.len() >= 2 =>
             {
-                let owned_needle: &'static [u8] = needle.clone().leak();
-                let finder = memmem::Finder::new(owned_needle);
+                let boxed: Box<[u8]> = needle.clone().into_boxed_slice();
+                let leaked: &'static [u8] = Box::leak(boxed);
+                let finder = memmem::Finder::new(leaked);
                 (None, Some(finder))
             }
             _ => (None, None),
@@ -1318,7 +1319,12 @@ impl Regex {
             }
 
             SearchStrategy::None => {
-                self.find_at_linear(text, start)
+                // Use selective prefilter if available, otherwise linear scan
+                if !matches!(self.selective_prefilter, selective::Prefilter::None) {
+                    self.find_at_with_selective_prefilter(text, start)
+                } else {
+                    self.find_at_linear(text, start)
+                }
             }
         }
     }
@@ -1597,6 +1603,26 @@ impl Regex {
 
     /// Fallback: Linear scan trying every position from start
     #[inline]
+    /// Find using selective prefilter to skip to candidate positions
+    fn find_at_with_selective_prefilter(&self, text: &str, start: usize) -> Option<Match> {
+        let bytes = text.as_bytes();
+        let mut pos = start;
+        while pos <= text.len() {
+            let candidate = self.next_candidate(bytes, pos);
+            if candidate > text.len() { break; }
+            pos = candidate;
+            if let Some(m) = self.try_match_at(text, pos) {
+                return Some(m);
+            }
+            if pos < text.len() {
+                pos += text[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
     fn find_at_linear(&self, text: &str, start: usize) -> Option<Match> {
         let mut pos = start;
         while pos <= text.len() {
