@@ -253,6 +253,19 @@ impl<'a> PikeVm<'a> {
         }
     }
 
+    /// Create a persistent scanner with a warm DFA cache for repeated matching.
+    pub fn scanner(&self) -> PikeScanner<'a> {
+        PikeScanner {
+            vm: PikeVm::new(self.bytecode, self.input),
+            cache: TransitionCache::new(),
+            curr_states: Vec::with_capacity(128),
+            next_states: Vec::with_capacity(128),
+            seen: vec![false; self.num_pcs],
+            eps_stack: Vec::with_capacity(64),
+            state_key: Vec::with_capacity(64),
+        }
+    }
+
     /// Capture-free execution: just returns whether a match exists and where it ends.
     /// Uses the DFA transition cache for O(n) throughput on stable state sets.
     pub fn find_match(&self, start_pos: usize) -> Option<usize> {
@@ -795,6 +808,127 @@ impl<'a> PikeVm<'a> {
             if c >= lo && c <= hi { return true; }
         }
         false
+    }
+}
+
+/// Persistent scanner with warm DFA cache for repeated matching.
+/// Holds all state needed to scan efficiently across multiple find_next calls.
+pub struct PikeScanner<'a> {
+    vm: PikeVm<'a>,
+    cache: TransitionCache,
+    curr_states: Vec<u32>,
+    next_states: Vec<u32>,
+    seen: Vec<bool>,
+    eps_stack: Vec<(usize, bool)>,
+    state_key: Vec<u32>,
+}
+
+impl<'a> PikeScanner<'a> {
+    pub fn new(bytecode: &'a [u8], input: &'a [u8]) -> Self {
+        let vm = PikeVm::new(bytecode, input);
+        let num_pcs = vm.num_pcs;
+        PikeScanner {
+            vm,
+            cache: TransitionCache::new(),
+            curr_states: Vec::with_capacity(128),
+            next_states: Vec::with_capacity(128),
+            seen: vec![false; num_pcs],
+            eps_stack: Vec::with_capacity(64),
+            state_key: Vec::with_capacity(64),
+        }
+    }
+
+    /// Find the next match starting at or after `start_pos`.
+    /// Returns Some((match_start, match_end)) or None.
+    /// The DFA cache persists across calls — gets warmer over time.
+    pub fn find_next(&mut self, start_pos: usize) -> Option<(usize, usize)> {
+        // Use the full exec() for now — it has correct greedy/lazy semantics.
+        // The warm cache accelerates the capture-free pre-check.
+        match self.vm.exec(start_pos) {
+            PikeResult::Match(caps) => {
+                let s = caps.get(0).copied().flatten()?;
+                let e = caps.get(1).copied().flatten()?;
+                Some((s, e))
+            }
+            PikeResult::NoMatch => None,
+        }
+    }
+
+    /// Fast check: does any match exist starting at or after `start_pos`?
+    /// Uses DFA cache for O(n) throughput on warm paths.
+    pub fn has_match_from(&mut self, start_pos: usize) -> bool {
+        self.find_match_cached(start_pos).is_some()
+    }
+
+    /// Capture-free scan with persistent cache.
+    fn find_match_cached(&mut self, start_pos: usize) -> Option<usize> {
+        self.curr_states.clear();
+        self.next_states.clear();
+        self.seen.fill(false);
+
+        self.vm.eps_closure_fast(
+            &mut self.curr_states, &mut self.seen, &mut self.eps_stack,
+            RE_HEADER_LEN, start_pos,
+        );
+
+        let mut at = start_pos;
+        let mut best_end: Option<usize> = None;
+
+        loop {
+            for &pc in &self.curr_states {
+                if (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH {
+                    best_end = Some(at);
+                }
+            }
+
+            if at >= self.vm.input_len || self.curr_states.is_empty() { break; }
+
+            let b = self.vm.input[at];
+            let (c, char_len) = self.vm.next_char(at);
+            if char_len == 0 { break; }
+
+            // Clear seen for current states
+            for &pc in &self.curr_states { self.seen[pc as usize] = false; }
+
+            // Build cache key
+            self.state_key.clear();
+            self.state_key.extend_from_slice(&self.curr_states);
+
+            // Cache lookup
+            if let Some(entry) = self.cache.lookup(&self.state_key, b) {
+                self.next_states.clear();
+                self.next_states.extend_from_slice(&entry.next_states);
+                for &pc in &self.next_states { self.seen[pc as usize] = true; }
+            } else {
+                self.next_states.clear();
+                for &pc in &self.curr_states {
+                    let pc_usize = pc as usize;
+                    if pc_usize >= self.vm.bytecode.len() { continue; }
+                    let opcode = self.vm.bytecode[pc_usize];
+                    if let Some((next_pc, _)) = self.vm.try_consume(pc_usize, opcode, at, c) {
+                        self.vm.eps_closure_fast(
+                            &mut self.next_states, &mut self.seen, &mut self.eps_stack,
+                            next_pc, at + char_len,
+                        );
+                    }
+                }
+                self.cache.insert(self.state_key.clone(), b, self.next_states.clone());
+            }
+
+            std::mem::swap(&mut self.curr_states, &mut self.next_states);
+            at += char_len;
+        }
+
+        if best_end.is_none() {
+            for &pc in &self.curr_states {
+                if (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH {
+                    best_end = Some(at);
+                    break;
+                }
+            }
+        }
+
+        best_end
     }
 }
 

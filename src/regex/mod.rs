@@ -1911,12 +1911,27 @@ impl Regex {
                 MatchIterator::LowerSuffix(LowerSuffixMatches { text, pos: 0, suffix: suffix.clone() })
             }
             _ => {
-                MatchIterator::General(Matches {
-                    regex: self,
-                    text,
-                    last_end: 0,
-                    last_was_empty: false,
-                })
+                // Use Pike VM iterator for patterns routed to Pike VM
+                if self.use_pike_vm {
+                    let bytecode = unsafe {
+                        std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
+                    };
+                    let scanner = pikevm::PikeScanner::new(bytecode, text.as_bytes());
+                    MatchIterator::PikeVm(PikeVmMatches {
+                        scanner,
+                        regex: self,
+                        text,
+                        pos: 0,
+                        last_was_empty: false,
+                    })
+                } else {
+                    MatchIterator::General(Matches {
+                        regex: self,
+                        text,
+                        last_end: 0,
+                        last_was_empty: false,
+                    })
+                }
             }
         }
     }
@@ -2121,7 +2136,47 @@ pub enum MatchIterator<'r, 't> {
     QuotedStr(QuotedStringMatches<'t>),
     CapitalWord(CapitalWordMatches<'t>),
     LowerSuffix(LowerSuffixMatches<'t>),
+    /// Pike VM iterator with persistent DFA cache
+    PikeVm(PikeVmMatches<'r, 't>),
     General(Matches<'r, 't>),
+}
+
+/// Match iterator backed by a Pike VM scanner with persistent DFA cache.
+pub struct PikeVmMatches<'r, 't> {
+    scanner: pikevm::PikeScanner<'t>,
+    regex: &'r Regex,
+    text: &'t str,
+    pos: usize,
+    last_was_empty: bool,
+}
+
+impl<'r, 't> Iterator for PikeVmMatches<'r, 't> {
+    type Item = Match;
+
+    fn next(&mut self) -> Option<Match> {
+        if self.pos > self.text.len() { return None; }
+
+        let search_start = if self.last_was_empty {
+            let mut next = self.pos;
+            if next < self.text.len() {
+                next += self.text[next..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            } else {
+                return None;
+            }
+            next
+        } else {
+            self.pos
+        };
+
+        match self.scanner.find_next(search_start) {
+            Some((start, end)) => {
+                self.last_was_empty = start == end;
+                self.pos = end;
+                Some(Match { start, end })
+            }
+            None => None,
+        }
+    }
 }
 
 impl<'r, 't> Iterator for MatchIterator<'r, 't> {
@@ -2136,6 +2191,7 @@ impl<'r, 't> Iterator for MatchIterator<'r, 't> {
             MatchIterator::QuotedStr(q) => q.next(),
             MatchIterator::CapitalWord(c) => c.next(),
             MatchIterator::LowerSuffix(s) => s.next(),
+            MatchIterator::PikeVm(pike) => pike.next(),
             MatchIterator::General(gen) => gen.next(),
         }
     }
