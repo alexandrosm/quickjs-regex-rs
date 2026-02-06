@@ -833,11 +833,7 @@ impl Regex {
             .map_err(|e| Error::Syntax(e.to_string()))?;
 
         let bytecode_ptr = bytecode_vec.as_mut_ptr();
-        let bc_len = bytecode_vec.len();
         let strategy = analyze_pattern(&processed_pattern, final_flags);
-
-        eprintln!("[pure-rust] compiled: bc_len={}, owned_bytecode=true, captures={}",
-            bc_len, bytecode_vec[2]);
 
         Ok(Regex {
             bytecode: bytecode_ptr,
@@ -1893,7 +1889,6 @@ impl Drop for Regex {
         if self.owned_bytecode.is_some() {
             // Bytecode is owned by the Vec; Rust will free it when the Vec drops.
             // Do NOT call libc::free on Rust-allocated memory.
-            eprintln!("[drop] pure-rust regex dropped (owned_bytecode=true)");
             return;
         }
         if !self.bytecode.is_null() {
