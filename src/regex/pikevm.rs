@@ -159,6 +159,67 @@ enum EpsFrame {
 // Pike VM
 // ============================================================================
 
+/// LRU-style transition cache: memoizes (thread_set, byte) → next_thread_set.
+/// This turns the Pike VM into a lazy DFA for hot paths.
+const CACHE_SIZE: usize = 4096;
+
+struct TransitionCache {
+    /// Key: hash of (sorted state IDs, input byte)
+    /// Value: sorted list of (pc, next_pc) transitions
+    entries: Vec<Option<CacheEntry>>,
+}
+
+#[derive(Clone)]
+struct CacheEntry {
+    key_hash: u64,
+    state_key: Vec<u32>,   // sorted PCs of current thread set
+    input_byte: u8,
+    transitions: Vec<(u32, u32)>, // (from_pc, to_pc) pairs
+}
+
+impl TransitionCache {
+    fn new() -> Self {
+        TransitionCache {
+            entries: vec![None; CACHE_SIZE],
+        }
+    }
+
+    #[inline]
+    fn hash_key(states: &[u32], byte: u8) -> u64 {
+        // FNV-1a hash
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &s in states {
+            h ^= s as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h ^= byte as u64;
+        h = h.wrapping_mul(0x100000001b3);
+        h
+    }
+
+    fn lookup(&self, states: &[u32], byte: u8) -> Option<&CacheEntry> {
+        let hash = Self::hash_key(states, byte);
+        let idx = (hash as usize) % CACHE_SIZE;
+        if let Some(ref entry) = self.entries[idx] {
+            if entry.key_hash == hash && entry.input_byte == byte && entry.state_key == states {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
+    fn insert(&mut self, states: Vec<u32>, byte: u8, transitions: Vec<(u32, u32)>) {
+        let hash = Self::hash_key(&states, byte);
+        let idx = (hash as usize) % CACHE_SIZE;
+        self.entries[idx] = Some(CacheEntry {
+            key_hash: hash,
+            state_key: states,
+            input_byte: byte,
+            transitions,
+        });
+    }
+}
+
 pub struct PikeVm<'a> {
     bytecode: &'a [u8],
     input: &'a [u8],
@@ -198,6 +259,8 @@ impl<'a> PikeVm<'a> {
         let mut tmp_caps = vec![None; self.capture_count * 2];
         let mut tmp_regs = vec![0usize; self.register_count];
         let mut candidate: Option<Vec<Option<usize>>> = None;
+        let mut cache = TransitionCache::new();
+        let mut state_key: Vec<u32> = Vec::with_capacity(64);
 
         // Initialize: epsilon closure from bytecode start
         self.epsilon_closure(&mut curr, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, RE_HEADER_LEN, start_pos);
@@ -251,28 +314,69 @@ impl<'a> PikeVm<'a> {
             let (c, char_len) = self.next_char(at);
             if char_len == 0 { break; }
 
-            for i in 0..curr.threads.len() {
-                let (pc, slot_idx) = curr.threads[i];
-                let pc = pc as usize;
-                if pc >= self.bytecode.len() { continue; }
+            // Build state key for cache lookup (sorted PCs of current threads)
+            state_key.clear();
+            for &(pc, _) in &curr.threads {
+                state_key.push(pc);
+            }
 
-                let opcode = self.bytecode[pc];
-                if let Some((next_pc, _advance)) = self.try_consume(pc, opcode, at, c) {
-                    // Copy this thread's captures/regs to tmp, then epsilon-close into next
-                    let cs = curr.capture_stride;
-                    let src = slot_idx as usize * cs;
-                    for j in 0..cs.min(tmp_caps.len()) {
-                        tmp_caps[j] = curr.slots[src + j];
-                    }
-                    let rs = curr.reg_stride;
-                    if rs > 0 {
-                        let src_r = slot_idx as usize * rs;
-                        for j in 0..rs.min(tmp_regs.len()) {
-                            tmp_regs[j] = curr.regs[src_r + j];
+            // Try cache lookup for ASCII bytes (most common case)
+            let cache_hit = if c < 128 && self.register_count == 0 {
+                cache.lookup(&state_key, c as u8)
+                    .map(|entry| entry.transitions.clone())
+            } else {
+                None
+            };
+
+            if let Some(transitions) = cache_hit {
+                // Cache hit: apply memoized transitions
+                for &(from_pc, to_pc) in &transitions {
+                    // Find the source thread's captures
+                    let src_slot = curr.threads.iter()
+                        .find(|&&(pc, _)| pc == from_pc)
+                        .map(|&(_, si)| si);
+                    if let Some(slot_idx) = src_slot {
+                        let cs = curr.capture_stride;
+                        let src = slot_idx as usize * cs;
+                        for j in 0..cs.min(tmp_caps.len()) {
+                            tmp_caps[j] = curr.slots[src + j];
                         }
+                        self.epsilon_closure(&mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, to_pc as usize, at + char_len);
                     }
+                }
+            } else {
+                // Cache miss: compute transitions and store
+                let mut transitions: Vec<(u32, u32)> = Vec::new();
 
-                    self.epsilon_closure(&mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, next_pc, at + char_len);
+                for i in 0..curr.threads.len() {
+                    let (pc, slot_idx) = curr.threads[i];
+                    let pc_usize = pc as usize;
+                    if pc_usize >= self.bytecode.len() { continue; }
+
+                    let opcode = self.bytecode[pc_usize];
+                    if let Some((next_pc, _advance)) = self.try_consume(pc_usize, opcode, at, c) {
+                        transitions.push((pc, next_pc as u32));
+
+                        let cs = curr.capture_stride;
+                        let src = slot_idx as usize * cs;
+                        for j in 0..cs.min(tmp_caps.len()) {
+                            tmp_caps[j] = curr.slots[src + j];
+                        }
+                        let rs = curr.reg_stride;
+                        if rs > 0 {
+                            let src_r = slot_idx as usize * rs;
+                            for j in 0..rs.min(tmp_regs.len()) {
+                                tmp_regs[j] = curr.regs[src_r + j];
+                            }
+                        }
+
+                        self.epsilon_closure(&mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, next_pc, at + char_len);
+                    }
+                }
+
+                // Store in cache (only for ASCII, no registers)
+                if c < 128 && self.register_count == 0 {
+                    cache.insert(state_key.clone(), c as u8, transitions);
                 }
             }
 
