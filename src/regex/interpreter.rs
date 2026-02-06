@@ -8,7 +8,50 @@
 //! - Bounds check elimination in release mode
 //! - Unicode-aware \w and \b when UNICODE flag is set
 
-use super::unicode::lre_is_id_continue;
+/// Check if a Unicode codepoint is ID_Continue (for \w and \b in Unicode mode).
+/// ID_Continue includes: letters, digits, underscore, combining marks, connector punctuation.
+#[inline(always)]
+fn is_id_continue(c: u32) -> bool {
+    if let Some(ch) = char::from_u32(c) {
+        // Fast path for ASCII
+        if c < 128 {
+            return ch.is_ascii_alphanumeric() || ch == '_';
+        }
+        // Unicode: alphanumeric covers letters + digits, plus underscore
+        // and \u200C (ZWNJ), \u200D (ZWJ) per ECMAScript spec
+        ch.is_alphanumeric() || ch == '_' || ch == '\u{200C}' || ch == '\u{200D}'
+            || unicode_general_category_m(ch) // Combining marks (Mn, Mc, Me)
+            || ch == '\u{00B7}' // Middle dot (used in Catalan)
+    } else {
+        false
+    }
+}
+
+/// Check if character is in Unicode General Category M (Mark).
+#[inline(always)]
+fn unicode_general_category_m(c: char) -> bool {
+    // Mark categories: Mn (non-spacing), Mc (spacing combining), Me (enclosing)
+    // Use char properties - marks are between combining ranges
+    let cp = c as u32;
+    // Common combining mark ranges
+    (0x0300..=0x036F).contains(&cp) || // Combining Diacritical Marks
+    (0x0483..=0x0489).contains(&cp) || // Cyrillic combining marks
+    (0x0591..=0x05BD).contains(&cp) || // Hebrew combining marks
+    (0x0610..=0x061A).contains(&cp) || // Arabic combining marks
+    (0x064B..=0x065F).contains(&cp) || // Arabic combining marks
+    (0x0670..=0x0670).contains(&cp) || // Arabic superscript alef
+    (0x06D6..=0x06DC).contains(&cp) || // Arabic small marks
+    (0x06DF..=0x06E4).contains(&cp) || // Arabic small marks
+    (0x0730..=0x074A).contains(&cp) || // Syriac
+    (0x0900..=0x0903).contains(&cp) || // Devanagari
+    (0x093A..=0x094F).contains(&cp) || // Devanagari
+    (0x0951..=0x0957).contains(&cp) || // Devanagari stress
+    (0x0962..=0x0963).contains(&cp) || // Devanagari vowel
+    (0xFE00..=0xFE0F).contains(&cp) || // Variation Selectors
+    (0xFE20..=0xFE2F).contains(&cp) || // Combining Half Marks
+    (0x1AB0..=0x1AFF).contains(&cp) || // Combining Diacritical Marks Extended
+    (0x20D0..=0x20FF).contains(&cp)    // Combining marks for symbols
+}
 
 // ============================================================================
 // Constants
@@ -66,7 +109,7 @@ fn is_word_char_unicode(c: u32) -> bool {
         bitmap_contains(c, WORD_CHAR_LO, WORD_CHAR_HI)
     } else {
         // Unicode word character: ID_Continue property
-        lre_is_id_continue(c) != 0
+        is_id_continue(c)
     }
 }
 

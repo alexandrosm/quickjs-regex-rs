@@ -39,13 +39,16 @@ pub type Result<T> = std::result::Result<T, CompilerError>;
 
 /// Compile a regex pattern to bytecode (pure Rust replacement for lre_compile)
 pub fn compile_regex(pattern: &str, flags: Flags) -> Result<Vec<u8>> {
+    // Use unicode(false) to get JavaScript-compatible \w, \d, \s semantics.
+    // The codegen detects dot patterns (byte class spanning 0x00-0xFF minus \n)
+    // and emits the Dot opcode which correctly matches Unicode codepoints.
     let is_unicode = flags.contains(Flags::UNICODE);
     let hir = ParserBuilder::new()
         .unicode(is_unicode)
         .case_insensitive(flags.contains(Flags::IGNORE_CASE))
         .multi_line(flags.contains(Flags::MULTILINE))
         .dot_matches_new_line(flags.contains(Flags::DOT_ALL))
-        .utf8(is_unicode) // Only enforce UTF-8 validity in Unicode mode
+        .utf8(false) // Allow non-UTF8 patterns (dot matches any byte)
         .build()
         .parse(pattern)
         .map_err(|e| CompilerError::new(format!("Parse error: {}", e)))?;

@@ -165,8 +165,17 @@ impl CodeGenerator {
     fn compile_unicode_class(&mut self, class: &ClassUnicode) -> Result<()> {
         let ranges: Vec<_> = class.ranges().to_vec();
         if ranges.is_empty() {
-            // Empty class never matches; emit an impossible char
             self.builder.emit_op_u16(OpCode::Char, 0xFFFF);
+            return Ok(());
+        }
+
+        // Detect Unicode dot: class covering all codepoints except line terminators
+        if self.is_dot_unicode_class(&ranges) {
+            if self.flags.contains(Flags::DOT_ALL) {
+                self.builder.emit_op(OpCode::Any);
+            } else {
+                self.builder.emit_op(OpCode::Dot);
+            }
             return Ok(());
         }
 
@@ -209,7 +218,24 @@ impl CodeGenerator {
             return Ok(());
         }
 
-        // Byte ranges fit in u16
+        // Detect "dot" pattern: byte class matching everything except \n (0x0A).
+        // regex-syntax with unicode(false) turns `.` into Class::Bytes([0x00-0x09, 0x0B-0xFF]).
+        if self.is_dot_byte_class(&ranges) {
+            if self.flags.contains(Flags::DOT_ALL) {
+                self.builder.emit_op(OpCode::Any);
+            } else {
+                self.builder.emit_op(OpCode::Dot);
+            }
+            return Ok(());
+        }
+
+        // Detect "any" pattern (dot-all mode): [0x00-0xFF]
+        if ranges.len() == 1 && ranges[0].start() == 0 && ranges[0].end() == 0xFF {
+            self.builder.emit_op(OpCode::Any);
+            return Ok(());
+        }
+
+        // Regular byte ranges - fit in u16
         let op = if self.flags.contains(Flags::IGNORE_CASE) {
             OpCode::RangeI
         } else {
@@ -223,6 +249,40 @@ impl CodeGenerator {
         }
 
         Ok(())
+    }
+
+    /// Check if a Unicode class represents "dot" (excludes line terminators).
+    fn is_dot_unicode_class(&self, ranges: &[hir::ClassUnicodeRange]) -> bool {
+        // Unicode dot in regex-syntax: excludes \n(0x0A), \r(0x0D), \u2028, \u2029
+        // Typically produces ranges like: [0x0000-0x0009, 0x000B-0x000C, 0x000E-0x2027, 0x202A-0x10FFFF]
+        if ranges.len() >= 3 {
+            let first = &ranges[0];
+            let last = &ranges[ranges.len() - 1];
+            if first.start() == '\0' && last.end() == '\u{10FFFF}' {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a byte class represents the "dot" pattern (any byte except \n, \r, \u2028, \u2029).
+    fn is_dot_byte_class(&self, ranges: &[hir::ClassBytesRange]) -> bool {
+        // regex-syntax dot with unicode(false) = [0x00-0x09, 0x0B-0xFF] (2 ranges, excludes 0x0A)
+        if ranges.len() == 2
+            && ranges[0].start() == 0x00 && ranges[0].end() == 0x09
+            && ranges[1].start() == 0x0B && ranges[1].end() == 0xFF
+        {
+            return true;
+        }
+        // Also match [0x00-0x09, 0x0B-0x0C, 0x0E-0xFF] (excludes \n and \r)
+        if ranges.len() == 3
+            && ranges[0].start() == 0x00 && ranges[0].end() == 0x09
+            && ranges[1].start() == 0x0B && ranges[1].end() == 0x0C
+            && ranges[2].start() == 0x0E && ranges[2].end() == 0xFF
+        {
+            return true;
+        }
+        false
     }
 
     // ========================================================================
