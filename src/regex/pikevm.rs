@@ -253,6 +253,170 @@ impl<'a> PikeVm<'a> {
         }
     }
 
+    /// Capture-free execution: just returns whether a match exists and where it ends.
+    /// Uses the DFA transition cache for O(n) throughput on stable state sets.
+    pub fn find_match(&self, start_pos: usize) -> Option<usize> {
+        // Simplified thread list: just state IDs, no captures
+        let mut curr_states: Vec<u32> = Vec::with_capacity(128);
+        let mut next_states: Vec<u32> = Vec::with_capacity(128);
+        let mut seen = vec![false; self.num_pcs];
+        let mut eps_stack: Vec<(usize, bool)> = Vec::with_capacity(64); // (pc, is_restore)
+        let mut cache = TransitionCache::new();
+        let mut state_key: Vec<u32> = Vec::with_capacity(64);
+        let mut best_end: Option<usize> = None;
+
+        // Epsilon closure into curr_states (no captures)
+        self.eps_closure_fast(&mut curr_states, &mut seen, &mut eps_stack, RE_HEADER_LEN, start_pos);
+
+        let mut at = start_pos;
+        loop {
+            // Check for MATCH state
+            for &pc in &curr_states {
+                if (pc as usize) < self.bytecode.len() && self.bytecode[pc as usize] == op::MATCH {
+                    // Found a match ending at current position
+                    best_end = Some(at);
+                    // Don't break — continue to find the longest match at this start
+                }
+            }
+
+            if at >= self.input_len { break; }
+            if curr_states.is_empty() { break; }
+
+            let b = self.input[at];
+            let (c, char_len) = self.next_char(at);
+            if char_len == 0 { break; }
+
+            // Build state key for cache
+            state_key.clear();
+            state_key.extend_from_slice(&curr_states);
+
+            // Clear seen for next step
+            for &pc in &curr_states { seen[pc as usize] = false; }
+
+            // Cache lookup (ASCII only)
+            if let Some(entry) = cache.lookup(&state_key, b) {
+                next_states.clear();
+                next_states.extend_from_slice(&entry.next_states);
+                for &pc in &next_states { seen[pc as usize] = true; }
+            } else {
+                next_states.clear();
+
+                for &pc in &curr_states {
+                    let pc_usize = pc as usize;
+                    if pc_usize >= self.bytecode.len() { continue; }
+                    let opcode = self.bytecode[pc_usize];
+                    if let Some((next_pc, _)) = self.try_consume(pc_usize, opcode, at, c) {
+                        self.eps_closure_fast(&mut next_states, &mut seen, &mut eps_stack, next_pc, at + char_len);
+                    }
+                }
+
+                // Store in cache
+                cache.insert(state_key.clone(), b, next_states.clone());
+            }
+
+            // Swap (seen for curr will be cleared at top of next iteration)
+            std::mem::swap(&mut curr_states, &mut next_states);
+            at += char_len;
+        }
+
+        // Final check
+        if best_end.is_none() {
+            for &pc in &curr_states {
+                if (pc as usize) < self.bytecode.len() && self.bytecode[pc as usize] == op::MATCH {
+                    best_end = Some(at);
+                    break;
+                }
+            }
+        }
+
+        best_end
+    }
+
+    /// Fast epsilon closure for capture-free mode: just collects terminal PCs.
+    fn eps_closure_fast(
+        &self,
+        states: &mut Vec<u32>,
+        seen: &mut [bool],
+        stack: &mut Vec<(usize, bool)>,
+        start_pc: usize,
+        at: usize,
+    ) {
+        stack.clear();
+        stack.push((start_pc, false));
+
+        while let Some((pc, _is_restore)) = stack.pop() {
+            if pc >= self.bytecode.len() { continue; }
+            if seen[pc] { continue; }
+
+            let opcode = self.bytecode[pc];
+            match opcode {
+                op::GOTO => {
+                    let offset = self.read_i32(pc + 1);
+                    let target = ((pc + 5) as isize + offset as isize) as usize;
+                    stack.push((target, false));
+                }
+                op::SPLIT_GOTO_FIRST => {
+                    let offset = self.read_i32(pc + 1);
+                    let goto = ((pc + 5) as isize + offset as isize) as usize;
+                    stack.push((pc + 5, false));
+                    stack.push((goto, false));
+                }
+                op::SPLIT_NEXT_FIRST => {
+                    let offset = self.read_i32(pc + 1);
+                    let goto = ((pc + 5) as isize + offset as isize) as usize;
+                    stack.push((goto, false));
+                    stack.push((pc + 5, false));
+                }
+                op::SAVE_START | op::SAVE_END => {
+                    stack.push((pc + 2, false));
+                }
+                op::SAVE_RESET => {
+                    stack.push((pc + 3, false));
+                }
+                op::SET_I32 => {
+                    // Skip register ops in capture-free mode
+                    stack.push((pc + 6, false));
+                }
+                op::LOOP_SPLIT_GOTO_FIRST | op::LOOP_SPLIT_NEXT_FIRST => {
+                    // Without registers, treat as simple split
+                    let offset = self.read_i32(pc + 6);
+                    let goto = ((pc + 10) as isize + offset as isize) as usize;
+                    let next = pc + 10;
+                    if opcode == op::LOOP_SPLIT_GOTO_FIRST {
+                        stack.push((next, false));
+                        stack.push((goto, false));
+                    } else {
+                        stack.push((goto, false));
+                        stack.push((next, false));
+                    }
+                }
+                op::LINE_START | op::LINE_START_M => {
+                    if at == 0 || (opcode == op::LINE_START_M && at > 0 && self.input[at - 1] == b'\n') {
+                        stack.push((pc + 1, false));
+                    }
+                }
+                op::LINE_END | op::LINE_END_M => {
+                    if at == self.input_len || (opcode == op::LINE_END_M && at < self.input_len && self.input[at] == b'\n') {
+                        stack.push((pc + 1, false));
+                    }
+                }
+                op::WORD_BOUNDARY | op::NOT_WORD_BOUNDARY => {
+                    let before = if at > 0 { is_word_char_at(self.input, at - 1) } else { false };
+                    let after = if at < self.input_len { is_word_char_at(self.input, at) } else { false };
+                    if (opcode == op::WORD_BOUNDARY) == (before != after) {
+                        stack.push((pc + 1, false));
+                    }
+                }
+                _ => {
+                    // Terminal (consuming) state
+                    seen[pc] = true;
+                    states.push(pc as u32);
+                }
+            }
+        }
+    }
+
+    /// Full execution with captures and greedy/lazy semantics.
     pub fn exec(&self, start_pos: usize) -> PikeResult {
         let mut curr = ThreadList::new(self.num_pcs, self.capture_count, self.register_count);
         let mut next = ThreadList::new(self.num_pcs, self.capture_count, self.register_count);

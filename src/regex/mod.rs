@@ -1359,6 +1359,8 @@ impl Regex {
 
     /// Try to match at an exact position (no scanning).
     /// Uses Pike VM for safe patterns (linear time), backtracker for others.
+    /// For Pike VM patterns, uses the cached capture-free path first (fast scan),
+    /// then falls back to full capture extraction only when needed.
     #[inline]
     fn try_match_at(&self, text: &str, pos: usize) -> Option<Match> {
         let text_bytes = text.as_bytes();
@@ -1368,6 +1370,15 @@ impl Regex {
 
         if self.use_pike_vm {
             let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+
+            // For large inputs: use fast capture-free scan first (with DFA cache)
+            if text_bytes.len() > 1024 {
+                if vm.find_match(pos).is_none() {
+                    return None; // No match anywhere — fast rejection
+                }
+            }
+
+            // Full execution for match span extraction
             match vm.exec(pos) {
                 pikevm::PikeResult::Match(caps) => {
                     let start = caps.get(0).copied().flatten()?;
