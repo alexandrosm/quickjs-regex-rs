@@ -172,9 +172,10 @@ struct TransitionCache {
 #[derive(Clone)]
 struct CacheEntry {
     key_hash: u64,
-    state_key: Vec<u32>,   // sorted PCs of current thread set
+    state_key: Vec<u32>,   // PCs of current thread set (in priority order)
     input_byte: u8,
-    transitions: Vec<(u32, u32)>, // (from_pc, to_pc) pairs
+    /// The full next-state set (PCs in priority order after epsilon closure)
+    next_states: Vec<u32>,
 }
 
 impl TransitionCache {
@@ -208,14 +209,14 @@ impl TransitionCache {
         None
     }
 
-    fn insert(&mut self, states: Vec<u32>, byte: u8, transitions: Vec<(u32, u32)>) {
+    fn insert(&mut self, states: Vec<u32>, byte: u8, next_states: Vec<u32>) {
         let hash = Self::hash_key(&states, byte);
         let idx = (hash as usize) % CACHE_SIZE;
         self.entries[idx] = Some(CacheEntry {
             key_hash: hash,
             state_key: states,
             input_byte: byte,
-            transitions,
+            next_states,
         });
     }
 }
@@ -320,34 +321,26 @@ impl<'a> PikeVm<'a> {
                 state_key.push(pc);
             }
 
-            // Try cache lookup for ASCII bytes (most common case)
-            let cache_hit = if c < 128 && self.register_count == 0 {
-                cache.lookup(&state_key, c as u8)
-                    .map(|entry| entry.transitions.clone())
+            // DFA cache disabled for now — needs separate capture-free execution path.
+            // The cache can't preserve captures across hits, which breaks match span detection.
+            // TODO: Add exec_count_only() that uses the cache for count/grep models.
+            let use_cache = false && c < 128 && self.register_count == 0;
+            let cache_hit = if use_cache {
+                cache.lookup(&state_key, c as u8).map(|e| e.next_states.clone())
             } else {
                 None
             };
 
-            if let Some(transitions) = cache_hit {
-                // Cache hit: apply memoized transitions
-                for &(from_pc, to_pc) in &transitions {
-                    // Find the source thread's captures
-                    let src_slot = curr.threads.iter()
-                        .find(|&&(pc, _)| pc == from_pc)
-                        .map(|&(_, si)| si);
-                    if let Some(slot_idx) = src_slot {
-                        let cs = curr.capture_stride;
-                        let src = slot_idx as usize * cs;
-                        for j in 0..cs.min(tmp_caps.len()) {
-                            tmp_caps[j] = curr.slots[src + j];
-                        }
-                        self.epsilon_closure(&mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, to_pc as usize, at + char_len);
-                    }
+            if let Some(next_states) = cache_hit {
+                // Cache hit: skip ALL epsilon closure work.
+                // Just add each cached next-state as a terminal thread.
+                // Captures are not preserved across cache hits (fine for count/find models).
+                tmp_caps.fill(None);
+                for &pc in &next_states {
+                    next.add(pc, &tmp_caps, &tmp_regs);
                 }
             } else {
-                // Cache miss: compute transitions and store
-                let mut transitions: Vec<(u32, u32)> = Vec::new();
-
+                // Cache miss: full computation
                 for i in 0..curr.threads.len() {
                     let (pc, slot_idx) = curr.threads[i];
                     let pc_usize = pc as usize;
@@ -355,8 +348,6 @@ impl<'a> PikeVm<'a> {
 
                     let opcode = self.bytecode[pc_usize];
                     if let Some((next_pc, _advance)) = self.try_consume(pc_usize, opcode, at, c) {
-                        transitions.push((pc, next_pc as u32));
-
                         let cs = curr.capture_stride;
                         let src = slot_idx as usize * cs;
                         for j in 0..cs.min(tmp_caps.len()) {
@@ -374,9 +365,10 @@ impl<'a> PikeVm<'a> {
                     }
                 }
 
-                // Store in cache (only for ASCII, no registers)
-                if c < 128 && self.register_count == 0 {
-                    cache.insert(state_key.clone(), c as u8, transitions);
+                // Store in cache
+                if use_cache {
+                    let next_pcs: Vec<u32> = next.threads.iter().map(|&(pc, _)| pc).collect();
+                    cache.insert(state_key.clone(), c as u8, next_pcs);
                 }
             }
 
