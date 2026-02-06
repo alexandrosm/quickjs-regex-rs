@@ -1212,6 +1212,19 @@ impl Regex {
             return self.find_at_linear(text, start);
         }
 
+        // For large haystacks, use selective prefilter if it can skip-scan
+        // (AC or memmem prefilters are much faster than per-position interpreter calls)
+        if len.saturating_sub(start) > 10_000 {
+            if matches!(self.selective_prefilter,
+                selective::Prefilter::MemmemStart(_) |
+                selective::Prefilter::MemmemInner { .. } |
+                selective::Prefilter::AhoCorasickStart(_) |
+                selective::Prefilter::AhoCorasickInner { .. }
+            ) {
+                return self.find_at_with_selective_prefilter(text, start);
+            }
+        }
+
         match &self.strategy {
             SearchStrategy::Anchored => {
                 // Only try at position 0
