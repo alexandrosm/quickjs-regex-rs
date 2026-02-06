@@ -1886,6 +1886,11 @@ impl Regex {
 
 impl Drop for Regex {
     fn drop(&mut self) {
+        if self.owned_bytecode.is_some() {
+            // Bytecode is owned by the Vec; Rust will free it when the Vec drops.
+            // Do NOT call libc::free on Rust-allocated memory.
+            return;
+        }
         if !self.bytecode.is_null() {
             // SAFETY: bytecode was allocated by lre_compile via lre_realloc (which uses libc::malloc).
             // It has not been freed (Drop only runs once). No other references exist

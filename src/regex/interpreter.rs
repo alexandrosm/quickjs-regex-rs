@@ -420,6 +420,10 @@ impl<'a> ExecContext<'a> {
 
     #[inline(always)]
     fn save_capture(&mut self, idx: usize) {
+        if idx >= self.captures.len() {
+            // Silently ignore out-of-bounds captures rather than corrupting heap
+            return;
+        }
         self.capture_saves.push((idx as u32, self.captures[idx]));
     }
 
@@ -435,7 +439,10 @@ impl<'a> ExecContext<'a> {
         let cap_start = capture_idx as usize;
         for i in (cap_start..self.capture_saves.len()).rev() {
             let (idx, val) = self.capture_saves[i];
-            self.captures[idx as usize] = val;
+            let idx = idx as usize;
+            if idx < self.captures.len() {
+                self.captures[idx] = val;
+            }
         }
         self.capture_saves.truncate(cap_start);
 
@@ -443,7 +450,10 @@ impl<'a> ExecContext<'a> {
         let reg_start = register_idx as usize;
         for i in (reg_start..self.register_saves.len()).rev() {
             let (idx, val) = self.register_saves[i];
-            self.registers[idx as usize] = val;
+            let idx = idx as usize;
+            if idx < self.registers.len() {
+                self.registers[idx] = val;
+            }
         }
         self.register_saves.truncate(reg_start);
     }
@@ -613,8 +623,10 @@ impl<'a> ExecContext<'a> {
                     let idx = self.read_u8(pc) as usize;
                     pc += 1;
                     let cap_idx = idx * 2;
-                    self.save_capture(cap_idx);
-                    self.captures[cap_idx] = Some(pos);
+                    if cap_idx < self.captures.len() {
+                        self.save_capture(cap_idx);
+                        self.captures[cap_idx] = Some(pos);
+                    }
                 }
 
                 // ============================================================
@@ -624,8 +636,10 @@ impl<'a> ExecContext<'a> {
                     let idx = self.read_u8(pc) as usize;
                     pc += 1;
                     let cap_idx = idx * 2 + 1;
-                    self.save_capture(cap_idx);
-                    self.captures[cap_idx] = Some(pos);
+                    if cap_idx < self.captures.len() {
+                        self.save_capture(cap_idx);
+                        self.captures[cap_idx] = Some(pos);
+                    }
                 }
 
                 // ============================================================
@@ -867,10 +881,12 @@ impl<'a> ExecContext<'a> {
                     for idx in start_idx..=end_idx {
                         let cap_start = idx * 2;
                         let cap_end = idx * 2 + 1;
-                        self.save_capture(cap_start);
-                        self.save_capture(cap_end);
-                        self.captures[cap_start] = None;
-                        self.captures[cap_end] = None;
+                        if cap_end < self.captures.len() {
+                            self.save_capture(cap_start);
+                            self.save_capture(cap_end);
+                            self.captures[cap_start] = None;
+                            self.captures[cap_end] = None;
+                        }
                     }
                 }
 
