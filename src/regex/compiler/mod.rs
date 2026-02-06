@@ -369,6 +369,21 @@ mod tests {
     }
 
     #[test]
+    fn test_negative_lookbehind_captures() {
+        // Test via direct bytecode execution (bypasses captures_at prefilter)
+        let bytecode = compile_regex(r"(?<!foo)bar", Flags::empty()).unwrap();
+        let text = b"bazbar";
+        let mut ctx = ExecContext::new(&bytecode, text);
+        let result = ctx.exec(0);
+        eprintln!("Direct exec result: {:?}", result);
+        // Also test via Regex::captures (goes through prefilter)
+        let re = crate::regex::Regex::new(r"(?<!foo)bar").unwrap();
+        eprintln!("Prefilter: {:?}", re.selective_prefilter);
+        let caps = re.captures("bazbar");
+        assert!(caps.is_some(), "(?<!foo)bar should match 'bazbar'");
+    }
+
+    #[test]
     fn test_inline_flag_group() {
         // (?i) should enable case-insensitive for the rest
         assert!(compile_and_match("(?i)hello", Flags::empty(), "HELLO"));

@@ -752,11 +752,17 @@ pub struct Regex {
     pattern: String,
     /// The flags
     flags: Flags,
-    /// Optimized search strategy
+    /// Optimized search strategy (heuristic-based)
     strategy: SearchStrategy,
     /// Rust-owned bytecode (when compiled by pure Rust compiler).
     /// When Some, bytecode ptr points into this Vec.
     owned_bytecode: Option<Vec<u8>>,
+    /// Selective prefilter derived from AST analysis
+    selective_prefilter: selective::Prefilter,
+    /// Aho-Corasick automaton for multi-literal prefiltering
+    ac_prefilter: Option<AhoCorasick>,
+    /// Memmem finder for single-literal prefiltering
+    memmem_prefilter: Option<memmem::Finder<'static>>,
 }
 
 // Regex is Send + Sync since the bytecode is immutable after compilation
@@ -784,11 +790,43 @@ impl Regex {
         let mut final_flags = flags;
         final_flags.insert(extracted_flags.bits());
 
+        // Parse and compile to bytecode
+        let ast = compiler::parser::parse(&processed_pattern, final_flags)
+            .map_err(|e| Error::Syntax(e.to_string()))?;
+
         let mut bytecode_vec = compiler::compile_regex(&processed_pattern, final_flags)
             .map_err(|e| Error::Syntax(e.to_string()))?;
 
         let bytecode_ptr = bytecode_vec.as_mut_ptr();
         let strategy = analyze_pattern(&processed_pattern, final_flags);
+
+        // Selective analysis: derive prefilter from AST
+        let ir = selective::from_ast(&ast);
+        let info = selective::analyze(&ir);
+        let sel_prefilter = selective::derive_prefilter(&info);
+
+        // Build Aho-Corasick or memmem prefilter objects
+        let (ac_prefilter, memmem_prefilter) = match &sel_prefilter {
+            selective::Prefilter::AhoCorasickStart(patterns)
+            | selective::Prefilter::AhoCorasickInner { patterns, .. }
+                if patterns.len() >= 2 =>
+            {
+                let ac = AhoCorasickBuilder::new()
+                    .match_kind(MatchKind::LeftmostFirst)
+                    .build(patterns)
+                    .ok();
+                (ac, None)
+            }
+            selective::Prefilter::MemmemStart(needle)
+            | selective::Prefilter::MemmemInner { needle, .. }
+                if needle.len() >= 2 =>
+            {
+                let owned_needle: &'static [u8] = needle.clone().leak();
+                let finder = memmem::Finder::new(owned_needle);
+                (None, Some(finder))
+            }
+            _ => (None, None),
+        };
 
         Ok(Regex {
             bytecode: bytecode_ptr,
@@ -796,6 +834,9 @@ impl Regex {
             flags: final_flags,
             strategy,
             owned_bytecode: Some(bytecode_vec),
+            selective_prefilter: sel_prefilter,
+            ac_prefilter,
+            memmem_prefilter,
         })
     }
 
@@ -1572,6 +1613,75 @@ impl Regex {
         None
     }
 
+    /// Use the selective prefilter to skip to the next candidate position.
+    /// Returns `pos` unchanged if no prefilter, or the next position worth trying.
+    /// IMPORTANT: the bytecode already has a prefix loop that tries every position.
+    /// This prefilter only helps when called from loops that try positions manually
+    /// (like captures_at). It must never skip backwards or return a position less
+    /// than pos.
+    #[inline]
+    fn next_candidate(&self, haystack: &[u8], pos: usize) -> usize {
+        if pos >= haystack.len() { return pos; }
+        let remaining = &haystack[pos..];
+
+        match &self.selective_prefilter {
+            selective::Prefilter::None => pos,
+            selective::Prefilter::AnchoredStart => {
+                if pos == 0 { 0 } else { haystack.len() + 1 }
+            }
+            selective::Prefilter::SingleByte(b) => {
+                memchr(*b, remaining).map(|i| pos + i).unwrap_or(haystack.len() + 1)
+            }
+            selective::Prefilter::ByteSet(bytes) => {
+                match bytes.len() {
+                    1 => memchr(bytes[0], remaining)
+                        .map(|i| pos + i).unwrap_or(haystack.len() + 1),
+                    2 => memchr2(bytes[0], bytes[1], remaining)
+                        .map(|i| pos + i).unwrap_or(haystack.len() + 1),
+                    3 => memchr3(bytes[0], bytes[1], bytes[2], remaining)
+                        .map(|i| pos + i).unwrap_or(haystack.len() + 1),
+                    _ => pos,
+                }
+            }
+            selective::Prefilter::MemmemStart(_) => {
+                if let Some(ref finder) = self.memmem_prefilter {
+                    finder.find(remaining).map(|i| pos + i).unwrap_or(haystack.len() + 1)
+                } else {
+                    pos
+                }
+            }
+            selective::Prefilter::MemmemInner { min_prefix, .. } => {
+                // Inner literal: find it, then back up to where match could start
+                if let Some(ref finder) = self.memmem_prefilter {
+                    finder.find(remaining).map(|i| {
+                        let lit_pos = pos + i;
+                        // Back up but never before current pos
+                        lit_pos.saturating_sub(*min_prefix).max(pos)
+                    }).unwrap_or(haystack.len() + 1)
+                } else {
+                    pos
+                }
+            }
+            selective::Prefilter::AhoCorasickStart(_) => {
+                if let Some(ref ac) = self.ac_prefilter {
+                    ac.find(remaining).map(|m| pos + m.start()).unwrap_or(haystack.len() + 1)
+                } else {
+                    pos
+                }
+            }
+            selective::Prefilter::AhoCorasickInner { min_prefix, .. } => {
+                if let Some(ref ac) = self.ac_prefilter {
+                    ac.find(remaining).map(|m| {
+                        let lit_pos = pos + m.start();
+                        lit_pos.saturating_sub(*min_prefix)
+                    }).unwrap_or(haystack.len() + 1)
+                } else {
+                    pos
+                }
+            }
+        }
+    }
+
     /// Find a match using the original C engine (for benchmarking comparison)
     /// Legacy C engine match — only for benchmarking comparisons.
     /// Uses the c2rust-transpiled lre_exec function.
@@ -1742,24 +1852,26 @@ impl Regex {
     }
 
     /// Get capture groups from a match starting at the given byte offset.
-    /// Get capture groups at a byte offset (pure Rust)
+    /// Get capture groups at a byte offset (pure Rust, with selective prefiltering)
     pub fn captures_at(&self, text: &str, start: usize) -> Option<Captures> {
         let text_bytes = text.as_bytes();
         let capture_count = self.capture_count();
 
-        // SAFETY: bytecode is valid from constructor
         let bytecode = unsafe {
             std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
         };
 
         let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
 
-        // Try matching at each position starting from 'start'
+        // Use selective prefilter to find candidate positions
         let mut pos = start;
         while pos <= text.len() {
+            // Skip to next candidate position using prefilter
+            pos = self.next_candidate(text_bytes, pos);
+            if pos > text.len() { break; }
+
             match ctx.exec(pos) {
                 interpreter::ExecResult::Match => {
-                    // Extract captures from context
                     let mut groups = Vec::with_capacity(capture_count);
                     for i in 0..capture_count {
                         let cap_start = ctx.captures.get(i * 2).copied().flatten();
@@ -1775,7 +1887,6 @@ impl Regex {
                     });
                 }
                 interpreter::ExecResult::NoMatch => {
-                    // Advance by one UTF-8 char
                     if pos < text.len() {
                         pos += text[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
                     } else {
