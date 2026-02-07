@@ -118,13 +118,10 @@ fn model_count_spans(
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
     let mut scratch = re.create_scratch();
-    // DEBUG: time a single pass to see if Wide NFA path is working
+    // DEBUG: write diagnostic before timer starts
     if matches!(mode, Mode::PureRust) {
-        let start_time = std::time::Instant::now();
-        let m = re.find_at_scratch(haystack, 0, &mut scratch);
         let _ = std::fs::write("/tmp/debug_wide.txt",
-            format!("first find_at_scratch: {:?} in {:?}, haystack={}\n",
-                m, start_time.elapsed(), haystack.len()));
+            format!("haystack_len={} strategy={}\n", haystack.len(), re.strategy_name()));
     }
     timer::run(b, || {
         let mut sum = 0;
