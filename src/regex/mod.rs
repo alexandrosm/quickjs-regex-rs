@@ -1938,13 +1938,19 @@ impl Regex {
                 _ => lit_pos,
             };
 
-            // Run Pike VM from the candidate position
-            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-            match vm.exec(try_pos) {
+            // Run Pike VM on a WINDOW around the literal, not the full remaining input.
+            // The match must start near the literal, so we only need a small region.
+            let window_start = try_pos;
+            let window_end = (lit_pos + 500).min(text_bytes.len()); // 500 bytes past literal
+            let window = &text_bytes[window_start..window_end];
+            let vm = pikevm::PikeVm::new(bytecode, window);
+            match vm.exec(0) {
                 pikevm::PikeResult::Match(caps) => {
                     count += 1;
-                    let end = caps.get(1).copied().flatten().unwrap_or(lit_pos + 1);
-                    search_from = if end > try_pos { end } else { lit_pos + 1 };
+                    // Translate window-relative end back to absolute
+                    let rel_end = caps.get(1).copied().flatten().unwrap_or(1);
+                    let abs_end = window_start + rel_end;
+                    search_from = if abs_end > try_pos { abs_end } else { lit_pos + 1 };
                 }
                 pikevm::PikeResult::NoMatch => {
                     search_from = lit_pos + 1;
