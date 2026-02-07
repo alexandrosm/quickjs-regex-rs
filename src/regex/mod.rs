@@ -1903,37 +1903,26 @@ impl Regex {
             std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
         };
 
-        // Scan with bit VM to find positions where matches occur
-        let candidates = prog.find_match_positions(text_bytes);
-
-        if candidates.is_empty() {
-            return 0;
-        }
-
-        // Verify each candidate with Pike VM (correct semantics)
         let mut count = 0;
-        let mut last_end = 0;
+        let mut scan_from = 0;
 
-        for candidate_pos in candidates {
-            if candidate_pos < last_end {
-                continue; // Skip — overlaps with previous match
+        while scan_from < text_bytes.len() {
+            // Pass 1: Bit VM scans from scan_from for next potential match
+            if !prog.has_match(&text_bytes[scan_from..]) {
+                break; // No more matches possible
             }
 
-            // Run Pike VM on a window around the candidate
-            let window_start = candidate_pos.saturating_sub(200);
-            let start = window_start.max(last_end); // Don't re-scan past previous match
-            let window_end = (candidate_pos + 500).min(text_bytes.len());
-            let window = &text_bytes[start..window_end];
-
-            let vm = pikevm::PikeVm::new(bytecode, window);
-            match vm.exec(0) {
+            // Pass 2: Pike VM verifies and extracts exact match bounds
+            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+            match vm.exec(scan_from) {
                 pikevm::PikeResult::Match(caps) => {
                     count += 1;
-                    let rel_end = caps.get(1).copied().flatten().unwrap_or(1);
-                    last_end = start + rel_end;
+                    let match_end = caps.get(1).copied().flatten().unwrap_or(scan_from + 1);
+                    let match_start = caps.get(0).copied().flatten().unwrap_or(scan_from);
+                    scan_from = if match_end > match_start { match_end } else { match_start + 1 };
                 }
                 pikevm::PikeResult::NoMatch => {
-                    // Bit VM had a false positive — move on
+                    break;
                 }
             }
         }
