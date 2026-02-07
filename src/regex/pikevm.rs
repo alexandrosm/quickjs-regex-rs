@@ -890,9 +890,26 @@ impl<'a> PikeScanner<'a> {
         let mut best_end: Option<usize> = None;
 
         loop {
+            // Check for match — first thread to reach MATCH wins
+            let mut found_match = false;
             for &pc in &self.curr_states {
                 if (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH {
                     best_end = Some(at);
+                    found_match = true;
+                    break;
+                }
+            }
+
+            // If we found a match and no higher-priority threads could extend it,
+            // return immediately. We check: are there non-MATCH threads before the
+            // match thread? If no, the match is final.
+            if found_match {
+                // Check if any higher-priority (earlier) thread is still alive and not MATCH
+                let match_is_highest = self.curr_states.first()
+                    .map(|&pc| (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH)
+                    .unwrap_or(false);
+                if match_is_highest {
+                    return best_end;
                 }
             }
 
