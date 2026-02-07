@@ -1863,6 +1863,14 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
+                // For Pike VM patterns: use capture-free scanner with DFA cache
+                if self.use_pike_vm {
+                    let bytecode = unsafe {
+                        std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
+                    };
+                    let mut scanner = pikevm::PikeScanner::new(bytecode, text.as_bytes());
+                    return scanner.count_all();
+                }
                 self.find_iter(text).count()
             }
         }

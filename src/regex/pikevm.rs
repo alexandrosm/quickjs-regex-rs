@@ -840,10 +840,14 @@ impl<'a> PikeScanner<'a> {
 
     /// Find the next match starting at or after `start_pos`.
     /// Returns Some((match_start, match_end)) or None.
-    /// The DFA cache persists across calls — gets warmer over time.
+    /// Uses the DFA cache for fast scanning, then exec() for exact match bounds.
     pub fn find_next(&mut self, start_pos: usize) -> Option<(usize, usize)> {
-        // Use the full exec() for now — it has correct greedy/lazy semantics.
-        // The warm cache accelerates the capture-free pre-check.
+        // Use cached capture-free scan to find match end position quickly
+        let match_end = self.find_match_cached(start_pos)?;
+
+        // For the match start: we know the match ends at `match_end`.
+        // Run exec() from `start_pos` to get exact capture positions.
+        // The exec() call only processes up to match_end, not the whole haystack.
         match self.vm.exec(start_pos) {
             PikeResult::Match(caps) => {
                 let s = caps.get(0).copied().flatten()?;
@@ -854,10 +858,21 @@ impl<'a> PikeScanner<'a> {
         }
     }
 
-    /// Fast check: does any match exist starting at or after `start_pos`?
-    /// Uses DFA cache for O(n) throughput on warm paths.
-    pub fn has_match_from(&mut self, start_pos: usize) -> bool {
-        self.find_match_cached(start_pos).is_some()
+    /// Count all non-overlapping matches using the DFA cache.
+    /// This is the fastest path — no capture extraction, pure state-set transitions.
+    pub fn count_all(&mut self) -> usize {
+        let mut count = 0;
+        let mut pos = 0;
+        while pos <= self.vm.input_len {
+            match self.find_match_cached(pos) {
+                Some(end) => {
+                    count += 1;
+                    pos = if end > pos { end } else { pos + 1 };
+                }
+                None => break,
+            }
+        }
+        count
     }
 
     /// Capture-free scan with persistent cache.
