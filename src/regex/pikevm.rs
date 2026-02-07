@@ -371,12 +371,51 @@ impl<'a> PikeVm<'a> {
         let mut eps_stack: Vec<EpsFrame> = Vec::with_capacity(64);
         let mut tmp_caps = vec![None; self.capture_count * 2];
         let mut tmp_regs = vec![0usize; self.register_count];
+        self.exec_inner(&mut curr, &mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, start_pos)
+    }
+
+    /// Full execution reusing pre-allocated buffers (avoids per-call allocation).
+    fn exec_reuse(
+        &self,
+        curr: &mut ThreadList,
+        next: &mut ThreadList,
+        eps_stack: &mut Vec<EpsFrame>,
+        tmp_caps: &mut Vec<Option<usize>>,
+        tmp_regs: &mut Vec<usize>,
+        start_pos: usize,
+    ) -> PikeResult {
+        // Ensure buffers are sized correctly for this VM
+        if curr.seen.len() < self.num_pcs {
+            *curr = ThreadList::new(self.num_pcs, self.capture_count, self.register_count);
+        } else {
+            curr.clear();
+        }
+        if next.seen.len() < self.num_pcs {
+            *next = ThreadList::new(self.num_pcs, self.capture_count, self.register_count);
+        } else {
+            next.clear();
+        }
+        tmp_caps.resize(self.capture_count * 2, None);
+        for v in tmp_caps.iter_mut() { *v = None; }
+        tmp_regs.resize(self.register_count, 0);
+        for v in tmp_regs.iter_mut() { *v = 0; }
+        self.exec_inner(curr, next, eps_stack, tmp_caps, tmp_regs, start_pos)
+    }
+
+    /// Core exec implementation with external buffers.
+    fn exec_inner(
+        &self,
+        curr: &mut ThreadList,
+        next: &mut ThreadList,
+        eps_stack: &mut Vec<EpsFrame>,
+        tmp_caps: &mut [Option<usize>],
+        tmp_regs: &mut [usize],
+        start_pos: usize,
+    ) -> PikeResult {
         let mut candidate: Option<Vec<Option<usize>>> = None;
-        
-        
 
         // Initialize: epsilon closure from bytecode start
-        self.epsilon_closure(&mut curr, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, RE_HEADER_LEN, start_pos);
+        self.epsilon_closure(curr, eps_stack, tmp_caps, tmp_regs, RE_HEADER_LEN, start_pos);
 
         let mut at = start_pos;
         loop {
@@ -448,11 +487,11 @@ impl<'a> PikeVm<'a> {
                         }
                     }
 
-                    self.epsilon_closure(&mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, next_pc, at + actual_advance);
+                    self.epsilon_closure(next, eps_stack, tmp_caps, tmp_regs, next_pc, at + actual_advance);
                 }
             }
 
-            std::mem::swap(&mut curr, &mut next);
+            std::mem::swap(curr, next);
             next.clear();
             at += char_len;
 
@@ -844,20 +883,35 @@ enum DfaStorage<'a> {
 
 /// Persistent scanner with warm DFA cache for repeated matching.
 /// Holds all state needed to scan efficiently across multiple find_next calls.
+/// Reuses exec buffers (ThreadLists) across calls to avoid per-call allocation.
 pub struct PikeScanner<'a> {
     vm: PikeVm<'a>,
     dfa: DfaStorage<'a>,
+    // DFA scan buffers
     curr_states: Vec<u32>,
     next_states: Vec<u32>,
     seen: Vec<bool>,
     eps_stack: Vec<(usize, bool)>,
+    // Exec buffers (reused across find_next calls to avoid allocation)
+    exec_curr: ThreadList,
+    exec_next: ThreadList,
+    exec_eps_stack: Vec<EpsFrame>,
+    exec_tmp_caps: Vec<Option<usize>>,
+    exec_tmp_regs: Vec<usize>,
 }
 
 impl<'a> PikeScanner<'a> {
     pub fn new(bytecode: &'a [u8], input: &'a [u8]) -> Self {
         let vm = PikeVm::new(bytecode, input);
         let num_pcs = vm.num_pcs;
+        let cc = vm.capture_count;
+        let rc = vm.register_count;
         PikeScanner {
+            exec_curr: ThreadList::new(num_pcs, cc, rc),
+            exec_next: ThreadList::new(num_pcs, cc, rc),
+            exec_eps_stack: Vec::with_capacity(64),
+            exec_tmp_caps: vec![None; cc * 2],
+            exec_tmp_regs: vec![0; rc],
             vm,
             dfa: DfaStorage::Owned(LazyDfa::new()),
             curr_states: Vec::with_capacity(128),
@@ -872,7 +926,14 @@ impl<'a> PikeScanner<'a> {
     pub fn with_cache(bytecode: &'a [u8], input: &'a [u8], cache: &'a RefCell<LazyDfa>) -> Self {
         let vm = PikeVm::new(bytecode, input);
         let num_pcs = vm.num_pcs;
+        let cc = vm.capture_count;
+        let rc = vm.register_count;
         PikeScanner {
+            exec_curr: ThreadList::new(num_pcs, cc, rc),
+            exec_next: ThreadList::new(num_pcs, cc, rc),
+            exec_eps_stack: Vec::with_capacity(64),
+            exec_tmp_caps: vec![None; cc * 2],
+            exec_tmp_regs: vec![0; rc],
             vm,
             dfa: DfaStorage::Borrowed(cache),
             curr_states: Vec::with_capacity(128),
@@ -884,15 +945,19 @@ impl<'a> PikeScanner<'a> {
 
     /// Find the next match starting at or after `start_pos`.
     /// Returns Some((match_start, match_end)) or None.
-    /// Uses the DFA cache for fast scanning, then exec() for exact match bounds.
+    /// Uses the DFA cache for fast scanning, then exec_reuse() for exact match bounds.
+    /// Reuses pre-allocated buffers to avoid per-call allocation overhead.
     pub fn find_next(&mut self, start_pos: usize) -> Option<(usize, usize)> {
         // Use cached capture-free scan to find match end position quickly
         let match_end = self.find_match_cached(start_pos)?;
 
-        // For the match start: we know the match ends at `match_end`.
-        // Run exec() from `start_pos` to get exact capture positions.
-        // The exec() call only processes up to match_end, not the whole haystack.
-        match self.vm.exec(start_pos) {
+        // For the match start: run exec_reuse() with pre-allocated buffers.
+        // This avoids the massive per-call allocation (7MB+ for complex patterns).
+        match self.vm.exec_reuse(
+            &mut self.exec_curr, &mut self.exec_next,
+            &mut self.exec_eps_stack, &mut self.exec_tmp_caps, &mut self.exec_tmp_regs,
+            start_pos,
+        ) {
             PikeResult::Match(caps) => {
                 let s = caps.get(0).copied().flatten()?;
                 let e = caps.get(1).copied().flatten()?;
@@ -922,11 +987,13 @@ impl<'a> PikeScanner<'a> {
             return count;
         }
 
-        // For register patterns: use full exec (correct but slower)
-        // The Bucket Queue optimization for these patterns requires
-        // the span super-instructions which are a future enhancement.
+        // For register patterns: use full exec with reused buffers
         while pos <= self.vm.input_len {
-            match self.vm.exec(pos) {
+            match self.vm.exec_reuse(
+                &mut self.exec_curr, &mut self.exec_next,
+                &mut self.exec_eps_stack, &mut self.exec_tmp_caps, &mut self.exec_tmp_regs,
+                pos,
+            ) {
                 PikeResult::Match(caps) => {
                     count += 1;
                     let end = caps.get(1).copied().flatten().unwrap_or(pos + 1);
