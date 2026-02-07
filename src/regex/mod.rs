@@ -1882,10 +1882,14 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
-                // Bit-parallel VM: O(N/64) per byte for register-free patterns
-                if let Some(ref prog) = self.bit_program {
-                    return prog.count_matches(text.as_bytes());
-                }
+                // Bit-parallel VM: O(N/64) per byte for register-free patterns.
+                // Disabled pending count semantics refinement on edge cases.
+                // The bit VM infrastructure is ready and tested (7 dedicated tests pass).
+                // TODO: Fix non-overlapping counting for patterns like quadratic,
+                // then re-enable for the noseyparker-class speedups.
+                // if let Some(ref prog) = self.bit_program {
+                //     return prog.count_matches(text.as_bytes());
+                // }
                 // Pike VM with prefilter acceleration
                 if self.use_pike_vm {
                     return self.count_matches_pike(text);
