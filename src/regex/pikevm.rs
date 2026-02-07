@@ -164,7 +164,7 @@ enum EpsFrame {
 
 /// LRU-style transition cache: memoizes (thread_set, byte) → next_thread_set.
 /// This turns the Pike VM into a lazy DFA for hot paths.
-const CACHE_SIZE: usize = 4096;
+const CACHE_SIZE: usize = 65536; // 64K entries for large state sets
 
 struct TransitionCache {
     /// Key: hash of (sorted state IDs, input byte)
@@ -190,14 +190,17 @@ impl TransitionCache {
 
     #[inline]
     fn hash_key(states: &[u32], byte: u8) -> u64 {
-        // FNV-1a hash
-        let mut h: u64 = 0xcbf29ce484222325;
-        for &s in states {
-            h ^= s as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        h ^= byte as u64;
-        h = h.wrapping_mul(0x100000001b3);
+        // Fast hash: use length + first + last + middle + byte.
+        // Full state comparison on lookup handles collisions.
+        let len = states.len() as u64;
+        let first = states.first().copied().unwrap_or(0) as u64;
+        let last = states.last().copied().unwrap_or(0) as u64;
+        let mid = if states.len() > 2 { states[states.len() / 2] as u64 } else { 0 };
+        let mut h = len.wrapping_mul(0x9e3779b97f4a7c15);
+        h ^= first.wrapping_mul(0x517cc1b727220a95);
+        h ^= last.wrapping_mul(0x6c62272e07bb0142);
+        h ^= mid.wrapping_mul(0x62b821756295c58d);
+        h ^= (byte as u64).wrapping_mul(0x100000001b3);
         h
     }
 
