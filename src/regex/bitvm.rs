@@ -365,7 +365,7 @@ impl BitVmProgram {
     pub fn count_matches(&self, input: &[u8]) -> usize {
         let mut count = 0;
         let mut state = self.initial_state;
-        let mut in_match = false;
+        let mut was_matching = false;
 
         for &byte in input {
             // Step 1: Filter — which active states accept this byte?
@@ -378,7 +378,7 @@ impl BitVmProgram {
                 let mut bits = accepted.words[word_idx];
                 while bits != 0 {
                     let bit = bits.trailing_zeros() as usize;
-                    bits &= bits - 1; // clear lowest bit
+                    bits &= bits - 1;
                     let state_idx = word_idx * 64 + bit;
                     if state_idx < self.num_states {
                         next.or_assign(&self.epsilon_closure[state_idx]);
@@ -386,7 +386,7 @@ impl BitVmProgram {
                 }
             }
 
-            // Always keep the initial state alive (prefix loop: can start matching anywhere)
+            // Always keep the initial state alive (prefix loop)
             next.or_assign(&self.initial_state);
 
             // Step 3: Check for match
@@ -398,14 +398,36 @@ impl BitVmProgram {
                 }
             }
 
-            if has_match && !in_match {
+            if has_match {
+                was_matching = true;
+            } else if was_matching {
+                // Match just ended — count it
                 count += 1;
-                in_match = true;
-            } else if !has_match {
-                in_match = false;
+                was_matching = false;
+                // Reset and re-process this byte from initial state
+                let mut re_accepted = self.initial_state;
+                re_accepted.and_assign(&self.char_masks[byte as usize]);
+                next = BitState::new(self.num_states);
+                for word_idx in 0..self.num_words {
+                    let mut bits = re_accepted.words[word_idx];
+                    while bits != 0 {
+                        let bit = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let state_idx = word_idx * 64 + bit;
+                        if state_idx < self.num_states {
+                            next.or_assign(&self.epsilon_closure[state_idx]);
+                        }
+                    }
+                }
+                next.or_assign(&self.initial_state);
             }
 
             state = next;
+        }
+
+        // Count final match if input ends while matching
+        if was_matching {
+            count += 1;
         }
 
         count

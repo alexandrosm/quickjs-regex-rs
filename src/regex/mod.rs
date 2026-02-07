@@ -1882,11 +1882,10 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
-                // Bit-parallel VM: infrastructure ready, needs match counting refinement.
-                // TODO: Enable once non-overlapping match semantics match Pike VM.
-                // if let Some(ref prog) = self.bit_program {
-                //     return prog.count_matches(text.as_bytes());
-                // }
+                // Bit-parallel VM: O(N/64) per byte for register-free patterns
+                if let Some(ref prog) = self.bit_program {
+                    return prog.count_matches(text.as_bytes());
+                }
                 // Pike VM with prefilter acceleration
                 if self.use_pike_vm {
                     return self.count_matches_pike(text);
