@@ -47,28 +47,31 @@ mod op {
 // Wide bit set: [u64; WORDS] where WORDS = ceil(num_states / 64)
 // ============================================================================
 
-const MAX_WORDS: usize = 16; // 16 * 64 = 1024 states max
-
-/// Fixed-width bit set for NFA state tracking
-#[derive(Clone, Copy)]
+/// Dynamic-width bit set for NFA state tracking.
+/// Supports arbitrarily large state counts (not limited to 1024).
+#[derive(Clone)]
 struct BitState {
-    words: [u64; MAX_WORDS],
-    num_words: usize,
+    words: Vec<u64>,
 }
 
 impl BitState {
     fn new(num_states: usize) -> Self {
+        let num_words = (num_states + 63) / 64;
         BitState {
-            words: [0u64; MAX_WORDS],
-            num_words: (num_states + 63) / 64,
+            words: vec![0u64; num_words],
         }
+    }
+
+    #[inline(always)]
+    fn num_words(&self) -> usize {
+        self.words.len()
     }
 
     #[inline(always)]
     fn set(&mut self, bit: usize) {
         let word = bit / 64;
         let pos = bit % 64;
-        if word < self.num_words {
+        if word < self.words.len() {
             self.words[word] |= 1u64 << pos;
         }
     }
@@ -77,32 +80,42 @@ impl BitState {
     fn get(&self, bit: usize) -> bool {
         let word = bit / 64;
         let pos = bit % 64;
-        word < self.num_words && (self.words[word] & (1u64 << pos)) != 0
+        word < self.words.len() && (self.words[word] & (1u64 << pos)) != 0
+    }
+
+    #[inline(always)]
+    fn any_set(&self, other: &BitState) -> bool {
+        for i in 0..self.words.len() {
+            if (self.words[i] & other.words[i]) != 0 {
+                return true;
+            }
+        }
+        false
     }
 
     #[inline(always)]
     fn is_empty(&self) -> bool {
-        self.words[..self.num_words].iter().all(|&w| w == 0)
+        self.words.iter().all(|&w| w == 0)
     }
 
     #[inline(always)]
     fn and_assign(&mut self, other: &BitState) {
-        for i in 0..self.num_words {
+        for i in 0..self.words.len() {
             self.words[i] &= other.words[i];
         }
     }
 
     #[inline(always)]
     fn or_assign(&mut self, other: &BitState) {
-        for i in 0..self.num_words {
+        for i in 0..self.words.len() {
             self.words[i] |= other.words[i];
         }
     }
 
     #[inline(always)]
     fn clear(&mut self) {
-        for i in 0..self.num_words {
-            self.words[i] = 0;
+        for w in &mut self.words {
+            *w = 0;
         }
     }
 }
@@ -155,9 +168,6 @@ impl BitVmProgram {
 
             if is_consuming {
                 let state_idx = state_to_pc.len();
-                if state_idx >= MAX_WORDS * 64 {
-                    return None; // Too many states
-                }
                 pc_to_state[pc] = state_idx;
                 state_to_pc.push(pc);
             }
@@ -383,71 +393,52 @@ impl BitVmProgram {
         })
     }
 
+    /// Advance a state through one byte: filter by char mask, compute epsilon closure, add prefix loop.
+    #[inline]
+    fn step(&self, state: &BitState, byte: u8) -> BitState {
+        let mut accepted = state.clone();
+        accepted.and_assign(&self.char_masks[byte as usize]);
+
+        let mut next = BitState::new(self.num_states);
+        for word_idx in 0..self.num_words {
+            let mut bits = accepted.words[word_idx];
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let state_idx = word_idx * 64 + bit;
+                if state_idx < self.num_states {
+                    next.or_assign(&self.epsilon_closure[state_idx]);
+                }
+            }
+        }
+        // Always keep the initial state alive (prefix loop for unanchored search)
+        next.or_assign(&self.initial_state);
+        next
+    }
+
     /// Count all non-overlapping matches in the input. O(N * num_words) time.
     pub fn count_matches(&self, input: &[u8]) -> usize {
         let mut count = 0;
-        let mut state = self.initial_state;
+        let mut state = self.initial_state.clone();
         let mut was_matching = false;
 
         for &byte in input {
-            // Step 1: Filter — which active states accept this byte?
-            let mut accepted = state;
-            accepted.and_assign(&self.char_masks[byte as usize]);
-
-            // Step 2: Advance — compute next states via epsilon closure
-            let mut next = BitState::new(self.num_states);
-            for word_idx in 0..self.num_words {
-                let mut bits = accepted.words[word_idx];
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    let state_idx = word_idx * 64 + bit;
-                    if state_idx < self.num_states {
-                        next.or_assign(&self.epsilon_closure[state_idx]);
-                    }
-                }
-            }
-
-            // Always keep the initial state alive (prefix loop)
-            next.or_assign(&self.initial_state);
-
-            // Step 3: Check for match
-            let mut has_match = false;
-            for i in 0..self.num_words {
-                if (next.words[i] & self.match_mask.words[i]) != 0 {
-                    has_match = true;
-                    break;
-                }
-            }
+            let next = self.step(&state, byte);
+            let has_match = next.any_set(&self.match_mask);
 
             if has_match {
                 was_matching = true;
             } else if was_matching {
-                // Match just ended — count it
                 count += 1;
                 was_matching = false;
                 // Reset and re-process this byte from initial state
-                let mut re_accepted = self.initial_state;
-                re_accepted.and_assign(&self.char_masks[byte as usize]);
-                next = BitState::new(self.num_states);
-                for word_idx in 0..self.num_words {
-                    let mut bits = re_accepted.words[word_idx];
-                    while bits != 0 {
-                        let bit = bits.trailing_zeros() as usize;
-                        bits &= bits - 1;
-                        let state_idx = word_idx * 64 + bit;
-                        if state_idx < self.num_states {
-                            next.or_assign(&self.epsilon_closure[state_idx]);
-                        }
-                    }
-                }
-                next.or_assign(&self.initial_state);
+                state = self.step(&self.initial_state, byte);
+                continue;
             }
 
             state = next;
         }
 
-        // Count final match if input ends while matching
         if was_matching {
             count += 1;
         }
@@ -455,79 +446,53 @@ impl BitVmProgram {
         count
     }
 
-    /// Scan for positions where matches START. Returns approximate byte positions
-    /// where the bit VM detects a match transition. The Pike VM verifies each one.
-    pub fn find_match_positions(&self, input: &[u8]) -> Vec<usize> {
-        let mut positions = Vec::new();
-        let mut state = self.initial_state;
-        let mut was_matching = false;
+    /// Find the end position of the leftmost match starting at or after `start_pos`.
+    /// Returns None if no match. This is the Wide NFA first pass — O(states/64) per byte,
+    /// no DFA state explosion, no fallback. Works for arbitrarily complex patterns.
+    pub fn find_match_end(&self, input: &[u8], start_pos: usize) -> Option<usize> {
+        let mut state = self.initial_state.clone();
+        let mut best_end: Option<usize> = None;
 
-        for (pos, &byte) in input.iter().enumerate() {
-            let mut accepted = state;
-            accepted.and_assign(&self.char_masks[byte as usize]);
-
-            let mut next = BitState::new(self.num_states);
-            for word_idx in 0..self.num_words {
-                let mut bits = accepted.words[word_idx];
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    let state_idx = word_idx * 64 + bit;
-                    if state_idx < self.num_states {
-                        next.or_assign(&self.epsilon_closure[state_idx]);
-                    }
-                }
-            }
-            next.or_assign(&self.initial_state);
-
-            let mut has_match = false;
-            for i in 0..self.num_words {
-                if (next.words[i] & self.match_mask.words[i]) != 0 {
-                    has_match = true;
-                    break;
-                }
-            }
-
-            // Record the position where a match STARTS (transition from no-match to match)
-            if has_match && !was_matching {
-                positions.push(pos);
-            }
-            was_matching = has_match;
-
-            state = next;
+        // Check if initial state has match (empty match at start_pos)
+        if state.any_set(&self.match_mask) {
+            best_end = Some(start_pos);
         }
 
-        positions
+        for at in start_pos..input.len() {
+            state = self.step(&state, input[at]);
+
+            if state.any_set(&self.match_mask) {
+                best_end = Some(at + 1);
+                // For leftmost-longest: check if MATCH is the only active state class.
+                // If no non-MATCH states remain, the match is complete.
+                let mut only_match = true;
+                for i in 0..self.num_words {
+                    if (state.words[i] & !self.match_mask.words[i]) != 0 {
+                        only_match = false;
+                        break;
+                    }
+                }
+                if only_match {
+                    return best_end;
+                }
+            }
+
+            if state.is_empty() {
+                break;
+            }
+        }
+
+        best_end
     }
 
     /// Check if any match exists in the input.
     pub fn has_match(&self, input: &[u8]) -> bool {
-        let mut state = self.initial_state;
+        let mut state = self.initial_state.clone();
         for &byte in input {
-            let mut accepted = state;
-            accepted.and_assign(&self.char_masks[byte as usize]);
-
-            let mut next = BitState::new(self.num_states);
-            for word_idx in 0..self.num_words {
-                let mut bits = accepted.words[word_idx];
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    let state_idx = word_idx * 64 + bit;
-                    if state_idx < self.num_states {
-                        next.or_assign(&self.epsilon_closure[state_idx]);
-                    }
-                }
+            state = self.step(&state, byte);
+            if state.any_set(&self.match_mask) {
+                return true;
             }
-            next.or_assign(&self.initial_state);
-
-            for i in 0..self.num_words {
-                if (next.words[i] & self.match_mask.words[i]) != 0 {
-                    return true;
-                }
-            }
-
-            state = next;
         }
         false
     }

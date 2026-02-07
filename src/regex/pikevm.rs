@@ -928,19 +928,13 @@ impl Scratch {
         }
     }
 
-    /// Two-pass find: DFA scan for match_end, bounded exec for (start, end).
-    /// All buffers reused from Scratch — zero allocation per call.
-    pub fn find_at(&mut self, vm: &PikeVm, start_pos: usize) -> Option<(usize, usize)> {
-        // Pass 1: DFA scan for match_end (O(1)/byte on warm cache)
-        let match_end = {
-            let mut dfa = self.dfa.borrow_mut();
-            PikeScanner::find_match_cached_inner(
-                vm, &mut dfa,
-                &mut self.dfa_curr_states, &mut self.dfa_next_states,
-                &mut self.dfa_seen, &mut self.dfa_eps_stack,
-                start_pos,
-            )
-        }?;
+    /// Two-pass find using Wide NFA + bounded exec.
+    /// Pass 1: Wide NFA (BitVmProgram) finds match_end in O(states/64)/byte — no DFA explosion.
+    /// Pass 2: Bounded exec on input[..match_end] finds match_start with correct semantics.
+    /// All exec buffers reused from Scratch — zero allocation per call.
+    pub fn find_at(&mut self, vm: &PikeVm, wide_nfa: &super::bitvm::BitVmProgram, start_pos: usize) -> Option<(usize, usize)> {
+        // Pass 1: Wide NFA for match_end (O(states/64) per byte, never explodes)
+        let match_end = wide_nfa.find_match_end(vm.input, start_pos)?;
 
         // Pass 2: bounded exec on input[..match_end] for match_start.
         // Only processes ~match_length bytes, not the entire remaining text.
@@ -971,11 +965,6 @@ impl Scratch {
                 }
             }
         }
-    }
-
-    /// Access the persistent DFA cache.
-    pub fn dfa_cache(&self) -> &RefCell<LazyDfa> {
-        &self.dfa
     }
 }
 

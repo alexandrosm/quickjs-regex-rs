@@ -844,16 +844,13 @@ impl Regex {
         // Pike VM already handles Unicode word chars via is_alphanumeric().
         let use_pike = !info.has_backrefs && !info.has_lookahead;
 
-        // Compile bit-parallel program if pattern fits and has no registers
-        // (registers control loop termination which bit VM can't handle)
-        // Skip for patterns with lookahead/lookbehind — bit VM can't traverse those opcodes
+        // Compile Wide NFA (dynamic-width bit-parallel program).
+        // Used for fast first-pass match_end detection: O(states/64) per byte.
+        // Works with any number of states (no 1024-state limit).
+        // Registers are ignored (treated as simple splits) — correct for match_end only.
+        // Skip for patterns with lookahead — bit VM can't traverse those opcodes.
         let bit_program = if use_pike && info.min_length > 0 && !info.has_lookahead {
-            let reg_count = bytecode_vec[3] as usize;
-            if reg_count == 0 {
-                bitvm::BitVmProgram::compile(&bytecode_vec)
-            } else {
-                None
-            }
+            bitvm::BitVmProgram::compile(&bytecode_vec)
         } else {
             None
         };
@@ -1951,11 +1948,16 @@ impl Regex {
     /// All buffers in Scratch — zero allocation per call. DFA cache warms across calls.
     fn find_at_linear_scratch(&self, text: &str, start: usize, scratch: &mut pikevm::Scratch) -> Option<Match> {
         if self.use_pike_vm {
-            let bytecode = self.bytecode_slice();
-            let text_bytes = text.as_bytes();
-            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-            return scratch.find_at(&vm, start)
-                .map(|(s, e)| Match { start: s, end: e });
+            if let Some(ref wide_nfa) = self.bit_program {
+                // Two-pass: Wide NFA (O(states/64)/byte) + bounded exec
+                let bytecode = self.bytecode_slice();
+                let text_bytes = text.as_bytes();
+                let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+                return scratch.find_at(&vm, wide_nfa, start)
+                    .map(|(s, e)| Match { start: s, end: e });
+            }
+            // Fallback: direct exec (for patterns without Wide NFA, e.g. lookahead)
+            return self.try_match_at(text, start);
         }
         // Backtracker path
         let mut pos = start;
