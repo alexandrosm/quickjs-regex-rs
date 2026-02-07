@@ -449,37 +449,45 @@ impl BitVmProgram {
     /// Find the end position of the leftmost match starting at or after `start_pos`.
     /// Returns None if no match. This is the Wide NFA first pass — O(states/64) per byte,
     /// no DFA state explosion, no fallback. Works for arbitrarily complex patterns.
+    /// Zero allocation in the hot loop (3 pre-allocated buffers, swapped each step).
     pub fn find_match_end(&self, input: &[u8], start_pos: usize) -> Option<usize> {
-        let mut state = self.initial_state.clone();
+        let w = self.num_words;
+        let mut curr = self.initial_state.clone();
+        let mut next = BitState::new(self.num_states);
         let mut best_end: Option<usize> = None;
 
-        // Check if initial state has match (empty match at start_pos)
-        if state.any_set(&self.match_mask) {
+        if curr.any_set(&self.match_mask) {
             best_end = Some(start_pos);
         }
 
         for at in start_pos..input.len() {
-            state = self.step(&state, input[at]);
+            let byte_mask = &self.char_masks[input[at] as usize];
 
-            if state.any_set(&self.match_mask) {
-                best_end = Some(at + 1);
-                // For leftmost-longest: check if MATCH is the only active state class.
-                // If no non-MATCH states remain, the match is complete.
-                let mut only_match = true;
-                for i in 0..self.num_words {
-                    if (state.words[i] & !self.match_mask.words[i]) != 0 {
-                        only_match = false;
-                        break;
+            // next = epsilon_closure(curr & char_mask[byte]) | initial_state
+            // Inline the step to avoid any allocation.
+            next.clear();
+            for word_idx in 0..w {
+                let mut bits = curr.words[word_idx] & byte_mask.words[word_idx];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let state_idx = word_idx * 64 + bit;
+                    if state_idx < self.num_states {
+                        next.or_assign(&self.epsilon_closure[state_idx]);
                     }
                 }
-                if only_match {
-                    return best_end;
-                }
+            }
+            next.or_assign(&self.initial_state);
+
+            if next.any_set(&self.match_mask) {
+                best_end = Some(at + 1);
             }
 
-            if state.is_empty() {
+            if next.is_empty() {
                 break;
             }
+
+            std::mem::swap(&mut curr, &mut next);
         }
 
         best_end
