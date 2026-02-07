@@ -97,6 +97,13 @@ pub enum OpCode {
     CheckAdvance = 43,
     /// Go to previous character (for lookbehind)
     Prev = 44,
+    // === Super-instructions: fused repeat + match ===
+    /// Consume min..max of ANY character (fused [\s\S]{min,max} or .{min,max} with dotall)
+    SpanAny = 45,
+    /// Consume min..max of DOT (any except \n) — fused .{min,max}
+    SpanDot = 46,
+    /// Consume min..max chars matching a character class (Range follows)
+    SpanClass = 47,
 }
 
 impl OpCode {
@@ -148,6 +155,11 @@ impl OpCode {
             OpCode::SetCharPos => 2,
             OpCode::CheckAdvance => 2,
             OpCode::Prev => 1,
+            // SpanAny/SpanDot: op(1) + min(4) + max(4) = 9
+            OpCode::SpanAny => 9,
+            OpCode::SpanDot => 9,
+            // SpanClass: op(1) + min(4) + max(4) + pair_count(2) + pairs(variable)
+            OpCode::SpanClass => 11, // base without pairs
         }
     }
 
@@ -199,6 +211,9 @@ impl OpCode {
             42 => Some(OpCode::SetCharPos),
             43 => Some(OpCode::CheckAdvance),
             44 => Some(OpCode::Prev),
+            45 => Some(OpCode::SpanAny),
+            46 => Some(OpCode::SpanDot),
+            47 => Some(OpCode::SpanClass),
             _ => None,
         }
     }
@@ -221,7 +236,9 @@ mod tests {
         assert_eq!(OpCode::from_u8(0), Some(OpCode::Invalid));
         assert_eq!(OpCode::from_u8(16), Some(OpCode::Match));
         assert_eq!(OpCode::from_u8(44), Some(OpCode::Prev));
-        assert_eq!(OpCode::from_u8(45), None);
+        assert_eq!(OpCode::from_u8(45), Some(OpCode::SpanAny));
+        assert_eq!(OpCode::from_u8(47), Some(OpCode::SpanClass));
+        assert_eq!(OpCode::from_u8(48), None);
         assert_eq!(OpCode::from_u8(255), None);
     }
 

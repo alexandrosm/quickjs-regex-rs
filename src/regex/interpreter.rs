@@ -354,6 +354,27 @@ impl<'a> ExecContext<'a> {
     /// Decode next UTF-8 char, return (codepoint, new_pos)
     /// ASCII fast path is critical - most text is ASCII
     #[inline(always)]
+    /// Get char and byte length at position (for span instructions)
+    fn next_char_from(&self, pos: usize) -> (u32, usize) {
+        match self.next_char(pos) {
+            Some((c, new_pos)) => (c, new_pos - pos),
+            None => (0, 0),
+        }
+    }
+
+    /// Get byte length of the character before `pos` (for backtracking in spans)
+    fn prev_char_len(&self, pos: usize) -> usize {
+        if pos == 0 { return 0; }
+        let b = self.input[pos - 1];
+        if b < 0x80 { return 1; }
+        // Walk back through UTF-8 continuation bytes
+        let mut back = 1;
+        while back < 4 && pos > back && (self.input[pos - 1 - back] & 0xC0) == 0x80 {
+            back += 1;
+        }
+        back + 1
+    }
+
     fn next_char(&self, pos: usize) -> Option<(u32, usize)> {
         if pos >= self.input_len {
             return None;
@@ -1470,6 +1491,68 @@ impl<'a> ExecContext<'a> {
                         pos = new_pos;
                         continue;
                     }
+                    if let Some((p, s)) = self.backtrack() {
+                        pc = p; pos = s; continue;
+                    }
+                    return ExecResult::NoMatch;
+                }
+
+                // ============================================================
+                // SPAN super-instructions (45-47)
+                // ============================================================
+                45 | 46 | 47 => {
+                    // SpanAny=45, SpanDot=46, SpanClass=47
+                    let min_count = self.read_u32(pc) as usize;
+                    let max_count = self.read_u32(pc + 4) as usize;
+                    pc += 8;
+
+                    let (pair_count, data_start) = if opcode == 47 {
+                        let n = self.read_u16(pc) as usize;
+                        pc += 2;
+                        let ds = pc;
+                        pc += n * 4;
+                        (n, ds)
+                    } else {
+                        (0, 0)
+                    };
+
+                    // Greedily consume max chars, then backtrack if needed
+                    let mut consumed = 0;
+                    let mut end_pos = pos;
+                    while consumed < max_count && end_pos < self.input_len {
+                        let (c, clen) = self.next_char_from(end_pos);
+                        if clen == 0 { break; }
+                        let ok = match opcode {
+                            45 => true, // Any
+                            46 => !matches!(c, 0x0A | 0x0D | 0x2028 | 0x2029), // Dot
+                            47 => check_range16_binary(c, &self.bytecode[data_start..data_start + pair_count * 4], pair_count),
+                            _ => false,
+                        };
+                        if !ok { break; }
+                        end_pos += clen;
+                        consumed += 1;
+                    }
+
+                    if consumed >= min_count {
+                        // Push backtrack points for greedy: try max first, then max-1, etc.
+                        // Only push for positions above min
+                        let mut bt_pos = end_pos;
+                        let mut bt_count = consumed;
+                        while bt_count > min_count {
+                            // Back up one char
+                            if bt_pos > pos {
+                                let prev = self.prev_char_len(bt_pos);
+                                bt_pos -= prev;
+                                bt_count -= 1;
+                                self.push_state(pc, bt_pos, StateType::Split);
+                            } else {
+                                break;
+                            }
+                        }
+                        pos = end_pos;
+                        continue;
+                    }
+
                     if let Some((p, s)) = self.backtrack() {
                         pc = p; pos = s; continue;
                     }

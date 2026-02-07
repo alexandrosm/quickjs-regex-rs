@@ -49,6 +49,9 @@ mod op {
     pub const RANGE_I: u8 = 37;
     pub const RANGE32: u8 = 38;
     pub const RANGE32_I: u8 = 39;
+    pub const SPAN_ANY: u8 = 45;
+    pub const SPAN_DOT: u8 = 46;
+    pub const SPAN_CLASS: u8 = 47;
 }
 
 // ============================================================================
@@ -524,7 +527,8 @@ impl<'a> PikeVm<'a> {
                     if pc_usize >= self.bytecode.len() { continue; }
 
                     let opcode = self.bytecode[pc_usize];
-                    if let Some((next_pc, _advance)) = self.try_consume(pc_usize, opcode, at, c) {
+                    if let Some((next_pc, advance)) = self.try_consume(pc_usize, opcode, at, c) {
+                        let actual_advance = if advance > char_len { advance } else { char_len };
                         let cs = curr.capture_stride;
                         let src = slot_idx as usize * cs;
                         for j in 0..cs.min(tmp_caps.len()) {
@@ -538,7 +542,7 @@ impl<'a> PikeVm<'a> {
                             }
                         }
 
-                        self.epsilon_closure(&mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, next_pc, at + char_len);
+                        self.epsilon_closure(&mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, next_pc, at + actual_advance);
                     }
                 }
 
@@ -771,9 +775,85 @@ impl<'a> PikeVm<'a> {
                 let check = if opcode == op::RANGE32_I { to_lower(c) } else { c };
                 if self.check_range32(check, pc + 3, n) { Some((pc + 3 + n * 8, char_len)) } else { None }
             }
-            op::MATCH => None, // Not consuming
+            op::SPAN_ANY => {
+                // Consume min..max of any character
+                let min_count = self.read_u32(pc + 1) as usize;
+                let max_count = self.read_u32(pc + 5) as usize;
+                let next_pc = pc + 9;
+                let consumed = self.span_any(at, min_count, max_count);
+                if consumed >= min_count {
+                    Some((next_pc, consumed))
+                } else {
+                    None
+                }
+            }
+            op::SPAN_DOT => {
+                let min_count = self.read_u32(pc + 1) as usize;
+                let max_count = self.read_u32(pc + 5) as usize;
+                let next_pc = pc + 9;
+                let consumed = self.span_dot(at, min_count, max_count);
+                if consumed >= min_count {
+                    Some((next_pc, consumed))
+                } else {
+                    None
+                }
+            }
+            op::SPAN_CLASS => {
+                let min_count = self.read_u32(pc + 1) as usize;
+                let max_count = self.read_u32(pc + 5) as usize;
+                let pair_count = self.read_u16(pc + 9) as usize;
+                let data_start = pc + 11;
+                let next_pc = data_start + pair_count * 4;
+                let consumed = self.span_class(at, min_count, max_count, data_start, pair_count);
+                if consumed >= min_count {
+                    Some((next_pc, consumed))
+                } else {
+                    None
+                }
+            }
+            op::MATCH => None,
             _ => None,
         }
+    }
+
+    /// Consume up to max_count of any character from position at. Returns byte count consumed.
+    fn span_any(&self, at: usize, _min: usize, max: usize) -> usize {
+        let mut pos = at;
+        let mut count = 0;
+        while count < max && pos < self.input_len {
+            let (_, clen) = self.next_char(pos);
+            if clen == 0 { break; }
+            pos += clen;
+            count += 1;
+        }
+        pos - at // byte count
+    }
+
+    /// Consume up to max_count of DOT (any except line terminators).
+    fn span_dot(&self, at: usize, _min: usize, max: usize) -> usize {
+        let mut pos = at;
+        let mut count = 0;
+        while count < max && pos < self.input_len {
+            let (c, clen) = self.next_char(pos);
+            if clen == 0 || matches!(c, 0x0A | 0x0D | 0x2028 | 0x2029) { break; }
+            pos += clen;
+            count += 1;
+        }
+        pos - at
+    }
+
+    /// Consume up to max_count chars matching a character class.
+    fn span_class(&self, at: usize, _min: usize, max: usize, data_start: usize, pair_count: usize) -> usize {
+        let mut pos = at;
+        let mut count = 0;
+        while count < max && pos < self.input_len {
+            let (c, clen) = self.next_char(pos);
+            if clen == 0 { break; }
+            if !self.check_range16(c, data_start, pair_count) { break; }
+            pos += clen;
+            count += 1;
+        }
+        pos - at
     }
 
     #[inline] fn next_char(&self, pos: usize) -> (u32, usize) {

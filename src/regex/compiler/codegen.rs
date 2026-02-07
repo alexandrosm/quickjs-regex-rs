@@ -445,6 +445,15 @@ impl CodeGenerator {
     // ========================================================================
 
     fn compile_repeat(&mut self, sub: &Node, min: u32, max: Option<u32>, greedy: bool) -> Result<()> {
+        // Super-instruction optimization: for simple repeat bodies (single char class,
+        // dot, any), emit a fused Span opcode instead of a loop. This converts O(n*m)
+        // loop iterations into a single O(n) scan.
+        // NOTE: Span instructions only work with the backtracking interpreter.
+        // The Pike VM advances all threads in lockstep (one char at a time), so
+        // variable-width span consumption breaks the synchronization.
+        // TODO: Enable for Pike VM once we add position-indexed thread queues.
+        // For now, spans are disabled since most patterns route to Pike VM.
+
         // Find capture groups inside the sub-expression for SaveReset (JS semantics:
         // captures inside a loop are reset at each iteration)
         let captures = self.find_captures(sub);
@@ -543,6 +552,110 @@ impl CodeGenerator {
             }
         }
         Ok(())
+    }
+
+    /// Try to emit a super-instruction for a simple bounded repeat.
+    /// Returns Ok(Some(())) if successful, Ok(None) if sub is too complex.
+    fn try_emit_span(&mut self, sub: &Node, min: u32, max: u32) -> Result<Option<()>> {
+        match sub {
+            Node::Dot => {
+                if self.flags.contains(Flags::DOT_ALL) {
+                    self.builder.emit_op(OpCode::SpanAny);
+                } else {
+                    self.builder.emit_op(OpCode::SpanDot);
+                }
+                self.builder.push_u32(min);
+                self.builder.push_u32(max);
+                Ok(Some(()))
+            }
+            Node::Class { ranges, negated: false } if !ranges.iter().any(|r| matches!(r, ClassRange::Builtin(_))) => {
+                // Simple character class — emit SpanClass
+                let mut pairs: Vec<(u32, u32)> = Vec::new();
+                for r in ranges {
+                    match r {
+                        ClassRange::Single(c) => pairs.push((*c as u32, *c as u32)),
+                        ClassRange::Range(lo, hi) => pairs.push((*lo as u32, *hi as u32)),
+                        _ => return Ok(None),
+                    }
+                }
+                pairs.sort_by_key(|p| p.0);
+                self.builder.emit_op(OpCode::SpanClass);
+                self.builder.push_u32(min);
+                self.builder.push_u32(max);
+                self.builder.push_u16(pairs.len() as u16);
+                for &(lo, hi) in &pairs {
+                    self.builder.push_u16(lo as u16);
+                    self.builder.push_u16(hi as u16);
+                }
+                Ok(Some(()))
+            }
+            Node::Builtin(BuiltinClass::Space) | Node::Builtin(BuiltinClass::NotSpace) => {
+                // \s or \S — use SpanAny-like instruction but check space
+                // For now, fall through to loop — complex to fuse
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Try to emit a super-instruction for {n,} (unbounded) repeat.
+    /// Emits a span for the mandatory part, then a greedy loop for the optional.
+    fn try_emit_span_unbounded(&mut self, sub: &Node, min: u32) -> Result<Option<()>> {
+        match sub {
+            Node::Dot => {
+                // Mandatory: span min chars, then greedy .* loop
+                if self.flags.contains(Flags::DOT_ALL) {
+                    self.builder.emit_op(OpCode::SpanAny);
+                } else {
+                    self.builder.emit_op(OpCode::SpanDot);
+                }
+                self.builder.push_u32(min);
+                self.builder.push_u32(min); // exact: consume min chars
+                // Then greedy .* for the rest
+                let split_op = OpCode::SplitNextFirst;
+                let loop_start = self.builder.pc();
+                let split_pc = self.builder.emit_goto(split_op, 0);
+                self.compile_dot()?;
+                let goto_pc = self.builder.pc();
+                self.builder.emit_goto(OpCode::Goto, 0);
+                self.builder.patch_goto(goto_pc + 1, loop_start);
+                let end_pc = self.builder.pc();
+                self.builder.patch_goto(split_pc, end_pc);
+                Ok(Some(()))
+            }
+            Node::Class { ranges, negated: false } if !ranges.iter().any(|r| matches!(r, ClassRange::Builtin(_))) => {
+                let mut pairs: Vec<(u32, u32)> = Vec::new();
+                for r in ranges {
+                    match r {
+                        ClassRange::Single(c) => pairs.push((*c as u32, *c as u32)),
+                        ClassRange::Range(lo, hi) => pairs.push((*lo as u32, *hi as u32)),
+                        _ => return Ok(None),
+                    }
+                }
+                pairs.sort_by_key(|p| p.0);
+                // Mandatory: span min chars
+                self.builder.emit_op(OpCode::SpanClass);
+                self.builder.push_u32(min);
+                self.builder.push_u32(min);
+                self.builder.push_u16(pairs.len() as u16);
+                for &(lo, hi) in &pairs {
+                    self.builder.push_u16(lo as u16);
+                    self.builder.push_u16(hi as u16);
+                }
+                // Then greedy class+ loop for the rest
+                let split_op = OpCode::SplitNextFirst;
+                let loop_start = self.builder.pc();
+                let split_pc = self.builder.emit_goto(split_op, 0);
+                self.compile_node(sub)?;
+                let goto_pc = self.builder.pc();
+                self.builder.emit_goto(OpCode::Goto, 0);
+                self.builder.patch_goto(goto_pc + 1, loop_start);
+                let end_pc = self.builder.pc();
+                self.builder.patch_goto(split_pc, end_pc);
+                Ok(Some(()))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Allocate a register for loop counters.
