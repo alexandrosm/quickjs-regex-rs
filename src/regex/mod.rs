@@ -843,9 +843,15 @@ impl Regex {
         // Skip Pike VM for Unicode mode (interpreter has special \w/\b Unicode handling).
         let use_pike = !info.has_backrefs && !final_flags.contains(Flags::UNICODE);
 
-        // Compile bit-parallel program if pattern is small enough
-        let bit_program = if use_pike {
-            bitvm::BitVmProgram::compile(&bytecode_vec)
+        // Compile bit-parallel program if pattern fits and has no registers
+        // (registers control loop termination which bit VM can't handle)
+        let bit_program = if use_pike && info.min_length > 0 {
+            let reg_count = bytecode_vec[3] as usize;
+            if reg_count == 0 {
+                bitvm::BitVmProgram::compile(&bytecode_vec)
+            } else {
+                None
+            }
         } else {
             None
         };
