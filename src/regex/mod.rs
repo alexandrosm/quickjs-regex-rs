@@ -1929,20 +1929,16 @@ impl Regex {
                 None => break, // No more candidates
             };
 
-            // Back up generously — the literal could be deep inside the match.
-            // Use max_length hint if available, otherwise back up 500 bytes.
-            let backup = match &self.selective_prefilter {
-                selective::Prefilter::MemmemInner { min_prefix, .. }
-                | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => {
-                    (*min_prefix).max(500) // At least 500 bytes backup
-                }
-                _ => 0,
-            };
+            // Back up by max possible prefix before the literal.
+            // min_prefix is the pattern's min_length. The actual prefix before the
+            // literal can be larger (due to variable-length parts). Use 200 bytes
+            // as a practical maximum — covers most real-world patterns.
+            let backup = 200;
             let try_pos = lit_pos.saturating_sub(backup);
 
-            // Search window: generous on both sides
+            // Window: backup before literal + 300 bytes after (for suffix after literal)
             let window_start = try_pos;
-            let window_end = (lit_pos + 1000).min(text_bytes.len());
+            let window_end = (lit_pos + 300).min(text_bytes.len());
             let window = &text_bytes[window_start..window_end];
             let vm = pikevm::PikeVm::new(bytecode, window);
             match vm.exec(0) {
