@@ -1863,17 +1863,96 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
-                // For Pike VM patterns: use capture-free scanner with DFA cache
+                // For Pike VM patterns: use prefilter-accelerated counting
                 if self.use_pike_vm {
-                    let bytecode = unsafe {
-                        std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
-                    };
-                    let mut scanner = pikevm::PikeScanner::new(bytecode, text.as_bytes());
-                    return scanner.count_all();
+                    return self.count_matches_pike(text);
                 }
                 self.find_iter(text).count()
             }
         }
+    }
+
+    /// Count matches using Pike VM with prefilter acceleration.
+    /// Uses memmem/AC to jump to candidate positions, then Pike VM to verify.
+    fn count_matches_pike(&self, text: &str) -> usize {
+        let text_bytes = text.as_bytes();
+        let bytecode = unsafe {
+            std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
+        };
+
+        // If we have a memmem or AC prefilter, use prefilter-accelerated counting
+        let has_literal_prefilter = matches!(self.selective_prefilter,
+            selective::Prefilter::MemmemStart(_) |
+            selective::Prefilter::MemmemInner { .. } |
+            selective::Prefilter::AhoCorasickStart(_) |
+            selective::Prefilter::AhoCorasickInner { .. }
+        );
+
+        if has_literal_prefilter && text_bytes.len() > 1024 {
+            return self.count_matches_pike_prefiltered(text);
+        }
+
+        // No useful prefilter — use DFA-cached scanner
+        let mut scanner = pikevm::PikeScanner::new(bytecode, text_bytes);
+        scanner.count_all()
+    }
+
+    /// Count matches by jumping to prefilter candidates and running Pike VM nearby.
+    fn count_matches_pike_prefiltered(&self, text: &str) -> usize {
+        let text_bytes = text.as_bytes();
+        let bytecode = unsafe {
+            std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
+        };
+        let mut count = 0;
+        let mut search_from = 0;
+
+        while search_from < text_bytes.len() {
+            let remaining = &text_bytes[search_from..];
+
+            // Find next literal candidate
+            let lit_pos = match &self.selective_prefilter {
+                selective::Prefilter::MemmemStart(_) | selective::Prefilter::MemmemInner { .. } => {
+                    self.memmem_prefilter.as_ref()
+                        .and_then(|f| f.find(remaining))
+                        .map(|i| search_from + i)
+                }
+                selective::Prefilter::AhoCorasickStart(_) | selective::Prefilter::AhoCorasickInner { .. } => {
+                    self.ac_prefilter.as_ref()
+                        .and_then(|ac| ac.find(remaining))
+                        .map(|m| search_from + m.start())
+                }
+                _ => None,
+            };
+
+            let lit_pos = match lit_pos {
+                Some(p) => p,
+                None => break, // No more candidates
+            };
+
+            // Back up to where the match could start
+            let try_pos = match &self.selective_prefilter {
+                selective::Prefilter::MemmemInner { min_prefix, .. }
+                | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => {
+                    lit_pos.saturating_sub(*min_prefix)
+                }
+                _ => lit_pos,
+            };
+
+            // Run Pike VM from the candidate position
+            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+            match vm.exec(try_pos) {
+                pikevm::PikeResult::Match(caps) => {
+                    count += 1;
+                    let end = caps.get(1).copied().flatten().unwrap_or(lit_pos + 1);
+                    search_from = if end > try_pos { end } else { lit_pos + 1 };
+                }
+                pikevm::PikeResult::NoMatch => {
+                    search_from = lit_pos + 1;
+                }
+            }
+        }
+
+        count
     }
 
     /// Find all non-overlapping matches.
