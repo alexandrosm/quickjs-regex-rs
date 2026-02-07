@@ -986,15 +986,21 @@ impl<'a> PikeScanner<'a> {
 
     /// Find the next match starting at or after `start_pos`.
     /// Returns Some((match_start, match_end)) or None.
-    /// Uses the DFA cache for fast scanning, then exec_reuse() for exact match bounds.
-    /// Reuses pre-allocated buffers to avoid per-call allocation overhead.
+    ///
+    /// Two-pass strategy:
+    ///   1. DFA scan (O(1)/byte on cache hits) → finds match_end
+    ///   2. Bounded exec on input[..match_end] → finds match_start
+    ///      Only processes ~match_length bytes, not the entire remaining text.
     pub fn find_next(&mut self, start_pos: usize) -> Option<(usize, usize)> {
-        // Use cached capture-free scan to find match end position quickly
+        // Pass 1: DFA scan for match_end (fast)
         let match_end = self.find_match_cached(start_pos)?;
 
-        // For the match start: run exec_reuse() with pre-allocated buffers.
-        // This avoids the massive per-call allocation (7MB+ for complex patterns).
-        match self.vm.exec_reuse(
+        // Pass 2: bounded exec only up to match_end to find match_start.
+        // This is critical for complex patterns (e.g. date regex with 3000 states):
+        // full exec would process O(remaining_text × states), but bounded exec
+        // only processes O(match_length × states).
+        let bounded_vm = PikeVm::new(self.vm.bytecode, &self.vm.input[..match_end]);
+        match bounded_vm.exec_reuse(
             &mut self.exec_curr, &mut self.exec_next,
             &mut self.exec_eps_stack, &mut self.exec_tmp_caps, &mut self.exec_tmp_regs,
             start_pos,
@@ -1004,7 +1010,22 @@ impl<'a> PikeScanner<'a> {
                 let e = caps.get(1).copied().flatten()?;
                 Some((s, e))
             }
-            PikeResult::NoMatch => None,
+            PikeResult::NoMatch => {
+                // DFA said match exists but bounded exec disagrees.
+                // Fall back to full exec (handles edge cases with assertions).
+                match self.vm.exec_reuse(
+                    &mut self.exec_curr, &mut self.exec_next,
+                    &mut self.exec_eps_stack, &mut self.exec_tmp_caps, &mut self.exec_tmp_regs,
+                    start_pos,
+                ) {
+                    PikeResult::Match(caps) => {
+                        let s = caps.get(0).copied().flatten()?;
+                        let e = caps.get(1).copied().flatten()?;
+                        Some((s, e))
+                    }
+                    PikeResult::NoMatch => None,
+                }
+            }
         }
     }
 

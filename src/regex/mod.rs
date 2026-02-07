@@ -1947,19 +1947,15 @@ impl Regex {
     }
 
     /// Core scratch-based linear scan for Pike VM.
+    /// Two-pass: DFA O(1)/byte finds match_end, bounded exec finds match_start.
     fn find_at_linear_scratch(&self, text: &str, start: usize, scratch: &mut pikevm::Scratch) -> Option<Match> {
         if self.use_pike_vm {
             let bytecode = self.bytecode_slice();
             let text_bytes = text.as_bytes();
-            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-            return match vm.exec_with_scratch(scratch, start) {
-                pikevm::PikeResult::Match(caps) => {
-                    let s = caps.get(0).copied().flatten()?;
-                    let e = caps.get(1).copied().flatten()?;
-                    Some(Match { start: s, end: e })
-                }
-                pikevm::PikeResult::NoMatch => None,
-            };
+            // PikeScanner does two-pass: DFA → match_end, bounded exec → match_start
+            let mut scanner = pikevm::PikeScanner::new(bytecode, text_bytes);
+            return scanner.find_next(start)
+                .map(|(s, e)| Match { start: s, end: e });
         }
         // Backtracker path
         let mut pos = start;
