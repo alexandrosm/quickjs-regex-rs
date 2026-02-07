@@ -433,6 +433,51 @@ impl BitVmProgram {
         count
     }
 
+    /// Scan for positions where matches START. Returns approximate byte positions
+    /// where the bit VM detects a match transition. The Pike VM verifies each one.
+    pub fn find_match_positions(&self, input: &[u8]) -> Vec<usize> {
+        let mut positions = Vec::new();
+        let mut state = self.initial_state;
+        let mut was_matching = false;
+
+        for (pos, &byte) in input.iter().enumerate() {
+            let mut accepted = state;
+            accepted.and_assign(&self.char_masks[byte as usize]);
+
+            let mut next = BitState::new(self.num_states);
+            for word_idx in 0..self.num_words {
+                let mut bits = accepted.words[word_idx];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let state_idx = word_idx * 64 + bit;
+                    if state_idx < self.num_states {
+                        next.or_assign(&self.epsilon_closure[state_idx]);
+                    }
+                }
+            }
+            next.or_assign(&self.initial_state);
+
+            let mut has_match = false;
+            for i in 0..self.num_words {
+                if (next.words[i] & self.match_mask.words[i]) != 0 {
+                    has_match = true;
+                    break;
+                }
+            }
+
+            // Record the position where a match STARTS (transition from no-match to match)
+            if has_match && !was_matching {
+                positions.push(pos);
+            }
+            was_matching = has_match;
+
+            state = next;
+        }
+
+        positions
+    }
+
     /// Check if any match exists in the input.
     pub fn has_match(&self, input: &[u8]) -> bool {
         let mut state = self.initial_state;

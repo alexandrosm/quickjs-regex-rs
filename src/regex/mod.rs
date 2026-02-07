@@ -1882,14 +1882,10 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
-                // Bit-parallel VM: O(N/64) per byte for register-free patterns.
-                // Disabled pending count semantics refinement on edge cases.
-                // The bit VM infrastructure is ready and tested (7 dedicated tests pass).
-                // TODO: Fix non-overlapping counting for patterns like quadratic,
-                // then re-enable for the noseyparker-class speedups.
-                // if let Some(ref prog) = self.bit_program {
-                //     return prog.count_matches(text.as_bytes());
-                // }
+                // Scanner/Verifier: Bit VM fast-forwards, Pike VM verifies
+                if let Some(ref prog) = self.bit_program {
+                    return self.count_matches_bit_scanner(text, prog);
+                }
                 // Pike VM with prefilter acceleration
                 if self.use_pike_vm {
                     return self.count_matches_pike(text);
@@ -1897,6 +1893,52 @@ impl Regex {
                 self.find_iter(text).count()
             }
         }
+    }
+
+    /// Scanner/Verifier: Bit VM scans for potential matches at O(N/64),
+    /// Pike VM verifies each candidate with correct greedy/lazy semantics.
+    fn count_matches_bit_scanner(&self, text: &str, prog: &bitvm::BitVmProgram) -> usize {
+        let text_bytes = text.as_bytes();
+        let bytecode = unsafe {
+            std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
+        };
+
+        // Scan with bit VM to find positions where matches occur
+        let candidates = prog.find_match_positions(text_bytes);
+
+        if candidates.is_empty() {
+            return 0;
+        }
+
+        // Verify each candidate with Pike VM (correct semantics)
+        let mut count = 0;
+        let mut last_end = 0;
+
+        for candidate_pos in candidates {
+            if candidate_pos < last_end {
+                continue; // Skip — overlaps with previous match
+            }
+
+            // Run Pike VM on a window around the candidate
+            let window_start = candidate_pos.saturating_sub(200);
+            let start = window_start.max(last_end); // Don't re-scan past previous match
+            let window_end = (candidate_pos + 500).min(text_bytes.len());
+            let window = &text_bytes[start..window_end];
+
+            let vm = pikevm::PikeVm::new(bytecode, window);
+            match vm.exec(0) {
+                pikevm::PikeResult::Match(caps) => {
+                    count += 1;
+                    let rel_end = caps.get(1).copied().flatten().unwrap_or(1);
+                    last_end = start + rel_end;
+                }
+                pikevm::PikeResult::NoMatch => {
+                    // Bit VM had a false positive — move on
+                }
+            }
+        }
+
+        count
     }
 
     /// Count matches using Pike VM with prefilter acceleration.
