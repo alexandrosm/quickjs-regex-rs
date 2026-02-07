@@ -1948,12 +1948,15 @@ impl Regex {
 
     /// Core scratch-based linear scan for Pike VM.
     /// Two-pass: DFA O(1)/byte finds match_end, bounded exec finds match_start.
+    /// DFA cache persists in Scratch across calls (warm cache = O(1)/byte).
     fn find_at_linear_scratch(&self, text: &str, start: usize, scratch: &mut pikevm::Scratch) -> Option<Match> {
         if self.use_pike_vm {
             let bytecode = self.bytecode_slice();
             let text_bytes = text.as_bytes();
-            // PikeScanner does two-pass: DFA → match_end, bounded exec → match_start
-            let mut scanner = pikevm::PikeScanner::new(bytecode, text_bytes);
+            // Use Scratch's persistent DFA cache (warm across calls)
+            let mut scanner = pikevm::PikeScanner::with_cache(
+                bytecode, text_bytes, scratch.dfa_cache(),
+            );
             return scanner.find_next(start)
                 .map(|(s, e)| Match { start: s, end: e });
         }

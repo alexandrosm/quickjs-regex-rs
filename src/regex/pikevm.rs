@@ -902,6 +902,8 @@ pub struct Scratch {
     eps_stack: Vec<EpsFrame>,
     tmp_caps: Vec<Option<usize>>,
     tmp_regs: Vec<usize>,
+    /// Persistent DFA cache — survives across find_at calls for warm O(1)/byte scanning.
+    dfa: RefCell<LazyDfa>,
 }
 
 impl Scratch {
@@ -912,7 +914,13 @@ impl Scratch {
             eps_stack: Vec::with_capacity(64),
             tmp_caps: vec![None; capture_count * 2],
             tmp_regs: vec![0; register_count],
+            dfa: RefCell::new(LazyDfa::new()),
         }
+    }
+
+    /// Access the persistent DFA cache (for PikeScanner::with_cache).
+    pub fn dfa_cache(&self) -> &RefCell<LazyDfa> {
+        &self.dfa
     }
 }
 
