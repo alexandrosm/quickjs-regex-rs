@@ -235,6 +235,28 @@ impl BitVmProgram {
                         }
                     }
                 }
+                op::RANGE32 => {
+                    let pair_count = u16::from_le_bytes([
+                        bytecode[state_pc + 1], bytecode[state_pc + 2]
+                    ]) as usize;
+                    for i in 0..pair_count {
+                        let base = state_pc + 3 + i * 8;
+                        let lo = u32::from_le_bytes([
+                            bytecode[base], bytecode[base + 1],
+                            bytecode[base + 2], bytecode[base + 3],
+                        ]) as usize;
+                        let hi = u32::from_le_bytes([
+                            bytecode[base + 4], bytecode[base + 5],
+                            bytecode[base + 6], bytecode[base + 7],
+                        ]) as usize;
+                        // Only process the byte-range portion (0-255)
+                        if lo < 256 {
+                            for b in lo..=hi.min(255) {
+                                char_masks[b].set(state_idx);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }

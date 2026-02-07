@@ -845,7 +845,8 @@ impl Regex {
 
         // Compile bit-parallel program if pattern fits and has no registers
         // (registers control loop termination which bit VM can't handle)
-        let bit_program = if use_pike && info.min_length > 0 {
+        // Skip for patterns with lookahead/lookbehind — bit VM can't traverse those opcodes
+        let bit_program = if use_pike && info.min_length > 0 && !info.has_lookahead {
             let reg_count = bytecode_vec[3] as usize;
             if reg_count == 0 {
                 bitvm::BitVmProgram::compile(&bytecode_vec)
@@ -877,6 +878,13 @@ impl Regex {
 
     /// Test if the pattern matches anywhere in the text
     pub fn is_match(&self, text: &str) -> bool {
+        // Bit VM fast REJECTION: if bit VM says no match, definitely no match.
+        // If it says yes, verify (bit VM ignores assertions so has false positives).
+        if let Some(ref prog) = self.bit_program {
+            if !prog.has_match(text.as_bytes()) {
+                return false;
+            }
+        }
         self.find(text).is_some()
     }
 
@@ -1241,8 +1249,15 @@ impl Regex {
             return self.find_at_linear(text, start);
         }
 
+        // Bit VM fast rejection: if no match exists in remaining input, return immediately.
+        // O(N/64) scan — much faster than Pike VM's O(N*states).
+        if let Some(ref prog) = self.bit_program {
+            if !prog.has_match(&text_bytes[start..]) {
+                return None;
+            }
+        }
+
         // For large haystacks, use selective prefilter if it can skip-scan
-        // (AC or memmem prefilters are much faster than per-position interpreter calls)
         if len.saturating_sub(start) > 10_000 {
             if matches!(self.selective_prefilter,
                 selective::Prefilter::MemmemStart(_) |
@@ -2111,13 +2126,19 @@ impl Regex {
         let text_bytes = text.as_bytes();
         let capture_count = self.capture_count();
 
+        // Bit VM fast rejection
+        if let Some(ref prog) = self.bit_program {
+            if !prog.has_match(&text_bytes[start..]) {
+                return None;
+            }
+        }
+
         let bytecode = unsafe {
             std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
         };
 
         let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
 
-        // Use selective prefilter to find candidate positions
         let mut pos = start;
         while pos <= text.len() {
             // Skip to next candidate position using prefilter
