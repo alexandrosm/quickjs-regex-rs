@@ -124,17 +124,21 @@ impl BitState {
 // Compiled bit masks: precomputed at regex compile time
 // ============================================================================
 
-/// Sparse closure: avoids 47-word OR for the common case (single-bit target).
-/// For the date regex, ~90% of consuming states have single-bit closures
-/// (interior chars of literal strings). This reduces per-byte cost from
-/// 500 × 47 word ORs to ~450 single-bit sets + ~50 dense ORs.
+/// Sparse closure: avoids 47-word OR for the common case.
+/// Single: 1 bit → set(idx). Few: 2-8 bits → set each.
+/// DenseRef: index into shared closure table (deduplicated).
+const MAX_FEW: usize = 8;
+
 enum SparseClosure {
     /// No reachable consuming states (dead end)
     Empty,
     /// Exactly one reachable consuming state — just set one bit
     Single(usize),
-    /// Multiple reachable states — full bit vector OR
-    Dense(BitState),
+    /// 2-8 reachable states — set each individually (faster than 47-word OR)
+    Few { indices: [u16; MAX_FEW], len: u8 },
+    /// Reference to a shared dense closure (deduplicated).
+    /// Many states share the same closure — do the OR once, not N times.
+    DenseRef(u16),
 }
 
 /// Pre-compiled masks for the bit-parallel VM.
@@ -146,6 +150,8 @@ pub struct BitVmProgram {
     match_mask: BitState,
     /// Epsilon closure from each state — sparse for single-target chains
     closures: Vec<SparseClosure>, // [num_states]
+    /// Shared dense closure table (deduplicated). DenseRef indexes into this.
+    dense_closures: Vec<BitState>,
     /// Dense closures (kept for count_matches which needs the old API)
     epsilon_closure: Vec<BitState>, // [num_states]
     /// Number of NFA states (bytecode PCs that are consuming instructions)
@@ -429,23 +435,42 @@ impl BitVmProgram {
             non_initial_mask.words[i] = !initial_state.words[i];
         }
 
-        // Build sparse closures: Single(idx) for chains, Dense for branches
+        // Build sparse closures with deduplication.
+        // For the date regex: 4296 states → 3839 Single, 33 Few, 422 DenseRef (15 unique)
+        // The 422 Dense closures collapse to 15 unique ones via DenseRef dedup.
+        // During simulation, batch OR: at most 15 ORs per byte instead of 422.
+        // Dense closures are shared via DenseRef — 422 states share 15 unique closures.
+        // During simulation, batch OR: each unique closure ORed at most once per byte.
+        let mut dense_table: Vec<BitState> = Vec::new();
+        let mut dense_map: std::collections::HashMap<Vec<u64>, u16> = std::collections::HashMap::new();
+
         let closures: Vec<SparseClosure> = epsilon_closure.iter().map(|ec| {
+            let mut indices = [0u16; MAX_FEW];
             let mut count = 0usize;
-            let mut single_idx = 0usize;
             for (wi, &word) in ec.words.iter().enumerate() {
-                if word != 0 {
-                    let bits = word.count_ones() as usize;
-                    count += bits;
-                    if count == 1 {
-                        single_idx = wi * 64 + word.trailing_zeros() as usize;
+                let mut w = word;
+                while w != 0 {
+                    let bit = w.trailing_zeros() as usize;
+                    w &= w - 1;
+                    if count < MAX_FEW {
+                        indices[count] = (wi * 64 + bit) as u16;
                     }
+                    count += 1;
                 }
             }
             match count {
                 0 => SparseClosure::Empty,
-                1 => SparseClosure::Single(single_idx),
-                _ => SparseClosure::Dense(ec.clone()),
+                1 => SparseClosure::Single(indices[0] as usize),
+                2..=MAX_FEW => SparseClosure::Few { indices, len: count as u8 },
+                _ => {
+                    // Deduplicate: reuse existing Dense entry if identical
+                    let id = *dense_map.entry(ec.words.clone()).or_insert_with(|| {
+                        let id = dense_table.len() as u16;
+                        dense_table.push(ec.clone());
+                        id
+                    });
+                    SparseClosure::DenseRef(id)
+                }
             }
         }).collect();
 
@@ -453,6 +478,7 @@ impl BitVmProgram {
             char_masks,
             match_mask,
             closures,
+            dense_closures: dense_table,
             epsilon_closure,
             num_states,
             state_to_pc,
@@ -541,7 +567,7 @@ impl BitVmProgram {
             next.words.copy_from_slice(&self.initial_contribution[byte].words);
 
             // Process only non-initial active states (mid-match threads).
-            // These are the states that have progressed past the initial position.
+            let mut dense_seen: u64 = 0;
             for word_idx in 0..w {
                 let mut bits = curr.words[word_idx]
                     & self.non_initial_mask.words[word_idx]
@@ -554,10 +580,21 @@ impl BitVmProgram {
                         match &self.closures[state_idx] {
                             SparseClosure::Empty => {}
                             SparseClosure::Single(idx) => next.set(*idx),
-                            SparseClosure::Dense(vec) => next.or_assign(vec),
+                            SparseClosure::Few { indices, len } => {
+                                for i in 0..*len as usize { next.set(indices[i] as usize); }
+                            }
+                            SparseClosure::DenseRef(id) => {
+                                dense_seen |= 1u64 << (*id as u32);
+                            }
                         }
                     }
                 }
+            }
+            // Batch OR: each unique dense closure applied at most once
+            while dense_seen != 0 {
+                let id = dense_seen.trailing_zeros() as usize;
+                dense_seen &= dense_seen - 1;
+                next.or_assign(&self.dense_closures[id]);
             }
 
             if next.any_set(&self.match_mask) {
@@ -596,6 +633,7 @@ impl BitVmProgram {
             next.words.copy_from_slice(&self.initial_contribution[byte].words);
 
             // Process non-initial active states
+            let mut dense_seen: u64 = 0;
             for word_idx in 0..w {
                 let mut bits = curr.words[word_idx]
                     & self.non_initial_mask.words[word_idx]
@@ -608,10 +646,21 @@ impl BitVmProgram {
                         match &self.closures[state_idx] {
                             SparseClosure::Empty => {}
                             SparseClosure::Single(idx) => next.set(*idx),
-                            SparseClosure::Dense(vec) => next.or_assign(vec),
+                            SparseClosure::Few { indices, len } => {
+                                for i in 0..*len as usize { next.set(indices[i] as usize); }
+                            }
+                            SparseClosure::DenseRef(id) => {
+                                dense_seen |= 1u64 << (*id as u32);
+                            }
                         }
                     }
                 }
+            }
+            // Batch OR: each unique dense closure applied at most once
+            while dense_seen != 0 {
+                let id = dense_seen.trailing_zeros() as usize;
+                dense_seen &= dense_seen - 1;
+                next.or_assign(&self.dense_closures[id]);
             }
 
             // Track match_start: first position where non-initial states appear from initial
