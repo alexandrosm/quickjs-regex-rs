@@ -928,43 +928,11 @@ impl Scratch {
         }
     }
 
-    /// Two-pass find using Wide NFA + bounded exec.
-    /// Pass 1: Wide NFA (BitVmProgram) finds match_end in O(states/64)/byte — no DFA explosion.
-    /// Pass 2: Bounded exec on input[..match_end] finds match_start with correct semantics.
-    /// All exec buffers reused from Scratch — zero allocation per call.
-    pub fn find_at(&mut self, vm: &PikeVm, wide_nfa: &super::bitvm::BitVmProgram, start_pos: usize) -> Option<(usize, usize)> {
-        // Pass 1: Wide NFA for match_end (O(states/64) per byte, never explodes)
-        let match_end = wide_nfa.find_match_end(vm.input, start_pos)?;
-
-        // Pass 2: bounded exec on input[..match_end] for match_start.
-        // Only processes ~match_length bytes, not the entire remaining text.
-        let bounded_vm = PikeVm::new(vm.bytecode, &vm.input[..match_end]);
-        match bounded_vm.exec_reuse(
-            &mut self.curr, &mut self.next,
-            &mut self.eps_stack, &mut self.tmp_caps, &mut self.tmp_regs,
-            start_pos,
-        ) {
-            PikeResult::Match(caps) => {
-                let s = caps.get(0).copied().flatten()?;
-                let e = caps.get(1).copied().flatten()?;
-                Some((s, e))
-            }
-            PikeResult::NoMatch => {
-                // Bounded exec disagrees — fall back to full exec
-                match vm.exec_reuse(
-                    &mut self.curr, &mut self.next,
-                    &mut self.eps_stack, &mut self.tmp_caps, &mut self.tmp_regs,
-                    start_pos,
-                ) {
-                    PikeResult::Match(caps) => {
-                        let s = caps.get(0).copied().flatten()?;
-                        let e = caps.get(1).copied().flatten()?;
-                        Some((s, e))
-                    }
-                    PikeResult::NoMatch => None,
-                }
-            }
-        }
+    /// Exec-free find using Wide NFA only. Returns (start, end).
+    /// No Pike VM exec needed — the Wide NFA tracks both match_start and match_end.
+    /// Per-byte cost: O(non_initial_states × words) with precomputed initial contributions.
+    pub fn find_at(&mut self, _vm: &PikeVm, wide_nfa: &super::bitvm::BitVmProgram, start_pos: usize) -> Option<(usize, usize)> {
+        wide_nfa.find_match(_vm.input, start_pos)
     }
 }
 

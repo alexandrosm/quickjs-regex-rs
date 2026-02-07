@@ -124,6 +124,19 @@ impl BitState {
 // Compiled bit masks: precomputed at regex compile time
 // ============================================================================
 
+/// Sparse closure: avoids 47-word OR for the common case (single-bit target).
+/// For the date regex, ~90% of consuming states have single-bit closures
+/// (interior chars of literal strings). This reduces per-byte cost from
+/// 500 × 47 word ORs to ~450 single-bit sets + ~50 dense ORs.
+enum SparseClosure {
+    /// No reachable consuming states (dead end)
+    Empty,
+    /// Exactly one reachable consuming state — just set one bit
+    Single(usize),
+    /// Multiple reachable states — full bit vector OR
+    Dense(BitState),
+}
+
 /// Pre-compiled masks for the bit-parallel VM.
 /// Created once from the bytecode, reused for every match.
 pub struct BitVmProgram {
@@ -131,7 +144,9 @@ pub struct BitVmProgram {
     char_masks: Vec<BitState>,  // [256]
     /// Which states are the MATCH state
     match_mask: BitState,
-    /// Epsilon closure from each state (precomputed)
+    /// Epsilon closure from each state — sparse for single-target chains
+    closures: Vec<SparseClosure>, // [num_states]
+    /// Dense closures (kept for count_matches which needs the old API)
     epsilon_closure: Vec<BitState>, // [num_states]
     /// Number of NFA states (bytecode PCs that are consuming instructions)
     num_states: usize,
@@ -143,6 +158,12 @@ pub struct BitVmProgram {
     num_words: usize,
     /// The initial state set (epsilon closure from start)
     initial_state: BitState,
+    /// Precomputed: for each byte, the combined closure of all initial states
+    /// that accept it, plus the initial_state itself. Avoids re-processing
+    /// ~500 initial states per byte — O(1) copy instead of O(500) closures.
+    initial_contribution: Vec<BitState>, // [256]
+    /// Inverse of initial_state — for masking out initial bits from curr
+    non_initial_mask: BitState,
 }
 
 impl BitVmProgram {
@@ -381,15 +402,65 @@ impl BitVmProgram {
             }
         }
 
+        // Precompute initial_contribution[byte]: combined closure of all initial
+        // states that accept each byte, plus the initial_state itself.
+        // This turns 500 per-byte closures into a single O(num_words) copy.
+        let mut initial_contribution = vec![BitState::new(num_states); 256];
+        for byte in 0..256usize {
+            // Start with initial_state (keep prefix loop alive)
+            initial_contribution[byte].or_assign(&initial_state);
+            // Add closures of all initial states that accept this byte
+            for word_idx in 0..num_words {
+                let mut bits = initial_state.words[word_idx] & char_masks[byte].words[word_idx];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let state_idx = word_idx * 64 + bit;
+                    if state_idx < num_states {
+                        initial_contribution[byte].or_assign(&epsilon_closure[state_idx]);
+                    }
+                }
+            }
+        }
+
+        // Non-initial mask: bits NOT in initial_state (for filtering mid-match states)
+        let mut non_initial_mask = BitState::new(num_states);
+        for i in 0..num_words {
+            non_initial_mask.words[i] = !initial_state.words[i];
+        }
+
+        // Build sparse closures: Single(idx) for chains, Dense for branches
+        let closures: Vec<SparseClosure> = epsilon_closure.iter().map(|ec| {
+            let mut count = 0usize;
+            let mut single_idx = 0usize;
+            for (wi, &word) in ec.words.iter().enumerate() {
+                if word != 0 {
+                    let bits = word.count_ones() as usize;
+                    count += bits;
+                    if count == 1 {
+                        single_idx = wi * 64 + word.trailing_zeros() as usize;
+                    }
+                }
+            }
+            match count {
+                0 => SparseClosure::Empty,
+                1 => SparseClosure::Single(single_idx),
+                _ => SparseClosure::Dense(ec.clone()),
+            }
+        }).collect();
+
         Some(BitVmProgram {
             char_masks,
             match_mask,
+            closures,
             epsilon_closure,
             num_states,
             state_to_pc,
             pc_to_state,
             num_words,
             initial_state,
+            initial_contribution,
+            non_initial_mask,
         })
     }
 
@@ -447,9 +518,9 @@ impl BitVmProgram {
     }
 
     /// Find the end position of the leftmost match starting at or after `start_pos`.
-    /// Returns None if no match. This is the Wide NFA first pass — O(states/64) per byte,
-    /// no DFA state explosion, no fallback. Works for arbitrarily complex patterns.
-    /// Zero allocation in the hot loop (3 pre-allocated buffers, swapped each step).
+    /// Returns None if no match. Wide NFA with precomputed initial contributions:
+    /// initial states (~500 for date regex) are handled via O(1) table lookup.
+    /// Only non-initial states (mid-match, ~20-50) need per-state closure processing.
     pub fn find_match_end(&self, input: &[u8], start_pos: usize) -> Option<usize> {
         let w = self.num_words;
         let mut curr = self.initial_state.clone();
@@ -461,23 +532,33 @@ impl BitVmProgram {
         }
 
         for at in start_pos..input.len() {
-            let byte_mask = &self.char_masks[input[at] as usize];
+            let byte = input[at] as usize;
+            let byte_mask = &self.char_masks[byte];
 
-            // next = epsilon_closure(curr & char_mask[byte]) | initial_state
-            // Inline the step to avoid any allocation.
-            next.clear();
+            // Start with precomputed initial contribution for this byte.
+            // This includes: initial_state | closures(initial_state & char_mask[byte])
+            // Handles ~500 initial states in O(num_words) copy instead of O(500) closures.
+            next.words.copy_from_slice(&self.initial_contribution[byte].words);
+
+            // Process only non-initial active states (mid-match threads).
+            // These are the states that have progressed past the initial position.
             for word_idx in 0..w {
-                let mut bits = curr.words[word_idx] & byte_mask.words[word_idx];
+                let mut bits = curr.words[word_idx]
+                    & self.non_initial_mask.words[word_idx]
+                    & byte_mask.words[word_idx];
                 while bits != 0 {
                     let bit = bits.trailing_zeros() as usize;
                     bits &= bits - 1;
                     let state_idx = word_idx * 64 + bit;
                     if state_idx < self.num_states {
-                        next.or_assign(&self.epsilon_closure[state_idx]);
+                        match &self.closures[state_idx] {
+                            SparseClosure::Empty => {}
+                            SparseClosure::Single(idx) => next.set(*idx),
+                            SparseClosure::Dense(vec) => next.or_assign(vec),
+                        }
                     }
                 }
             }
-            next.or_assign(&self.initial_state);
 
             if next.any_set(&self.match_mask) {
                 best_end = Some(at + 1);
@@ -491,6 +572,102 @@ impl BitVmProgram {
         }
 
         best_end
+    }
+
+    /// Find the leftmost match: returns (start, end). No exec needed.
+    /// Tracks match_start by recording when non-initial states first appear.
+    /// This is the fully exec-free path for count-spans throughput.
+    pub fn find_match(&self, input: &[u8], start_pos: usize) -> Option<(usize, usize)> {
+        let w = self.num_words;
+        let mut curr = self.initial_state.clone();
+        let mut next = BitState::new(self.num_states);
+        let mut match_start: Option<usize> = None;
+        let mut best: Option<(usize, usize)> = None;
+
+        if curr.any_set(&self.match_mask) {
+            best = Some((start_pos, start_pos));
+        }
+
+        for at in start_pos..input.len() {
+            let byte = input[at] as usize;
+            let byte_mask = &self.char_masks[byte];
+
+            // Start with precomputed initial contribution
+            next.words.copy_from_slice(&self.initial_contribution[byte].words);
+
+            // Process non-initial active states
+            for word_idx in 0..w {
+                let mut bits = curr.words[word_idx]
+                    & self.non_initial_mask.words[word_idx]
+                    & byte_mask.words[word_idx];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let state_idx = word_idx * 64 + bit;
+                    if state_idx < self.num_states {
+                        match &self.closures[state_idx] {
+                            SparseClosure::Empty => {}
+                            SparseClosure::Single(idx) => next.set(*idx),
+                            SparseClosure::Dense(vec) => next.or_assign(vec),
+                        }
+                    }
+                }
+            }
+
+            // Track match_start: first position where non-initial states appear from initial
+            // The initial_contribution adds targets of initial states that consumed this byte.
+            // Those targets are "new match attempts" starting at position `at`.
+            // If we don't have a match_start yet and the initial produced new non-initial states, record it.
+            if match_start.is_none() {
+                // Check if initial states consumed this byte and produced progress
+                let has_initial_progress = {
+                    let mut found = false;
+                    for word_idx in 0..w {
+                        // initial_contribution includes initial_state | closures
+                        // the NON-initial part of initial_contribution is the progress
+                        if (self.initial_contribution[byte].words[word_idx]
+                            & self.non_initial_mask.words[word_idx]) != 0
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    found
+                };
+                if has_initial_progress {
+                    match_start = Some(at);
+                }
+            }
+
+            if next.any_set(&self.match_mask) {
+                // Match found! The match_start is the earliest position where
+                // the matching branch first consumed a byte.
+                let start = match_start.unwrap_or(at);
+                best = Some((start, at + 1));
+                // For leftmost-first: return immediately on first match found
+                return best;
+            }
+
+            // If no non-initial states remain, reset match_start tracking
+            let mut has_non_initial = false;
+            for word_idx in 0..w {
+                if (next.words[word_idx] & self.non_initial_mask.words[word_idx]) != 0 {
+                    has_non_initial = true;
+                    break;
+                }
+            }
+            if !has_non_initial {
+                match_start = None;
+            }
+
+            if next.is_empty() {
+                break;
+            }
+
+            std::mem::swap(&mut curr, &mut next);
+        }
+
+        best
     }
 
     /// Check if any match exists in the input.

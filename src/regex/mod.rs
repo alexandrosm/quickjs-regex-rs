@@ -1904,42 +1904,9 @@ impl Regex {
     /// scratch space. This is the fast path: zero allocation per call.
     /// Create scratch via `regex.create_scratch()`. Each thread needs its own.
     pub fn find_at_scratch(&self, text: &str, start: usize, scratch: &mut pikevm::Scratch) -> Option<Match> {
-        let text_bytes = text.as_bytes();
-        let len = text_bytes.len();
-
-        if len.saturating_sub(start) < OPTIMIZATION_THRESHOLD {
-            return self.find_at_linear_scratch(text, start, scratch);
-        }
-
-        if let Some(ref prog) = self.bit_program {
-            if !prog.has_match(&text_bytes[start..]) {
-                return None;
-            }
-        }
-
-        if len.saturating_sub(start) > 10_000 {
-            if matches!(self.selective_prefilter,
-                selective::Prefilter::MemmemStart(_) |
-                selective::Prefilter::MemmemInner { .. } |
-                selective::Prefilter::AhoCorasickStart(_) |
-                selective::Prefilter::AhoCorasickInner { .. }
-            ) {
-                return self.find_at_linear_scratch(text, start, scratch);
-            }
-        }
-
-        // Fast paths that don't need scratch (pure memchr / literal)
-        match &self.strategy {
-            SearchStrategy::PureLiteral(finder) => {
-                return finder.find(&text_bytes[start..])
-                    .map(|pos| Match { start: start + pos, end: start + pos + finder.len() });
-            }
-            SearchStrategy::AlternationLiterals { literals, ac } => {
-                return self.find_at_alternation_literals(text, start, literals, ac);
-            }
-            _ => {}
-        }
-
+        // Skip has_match pre-check: the Wide NFA in find_at_linear_scratch
+        // already handles rejection. The pre-check scans the entire remaining
+        // text and is counterproductive when matches are dense.
         self.find_at_linear_scratch(text, start, scratch)
     }
 
