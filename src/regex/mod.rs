@@ -1929,19 +1929,20 @@ impl Regex {
                 None => break, // No more candidates
             };
 
-            // Back up to where the match could start
-            let try_pos = match &self.selective_prefilter {
+            // Back up generously — the literal could be deep inside the match.
+            // Use max_length hint if available, otherwise back up 500 bytes.
+            let backup = match &self.selective_prefilter {
                 selective::Prefilter::MemmemInner { min_prefix, .. }
                 | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => {
-                    lit_pos.saturating_sub(*min_prefix)
+                    (*min_prefix).max(500) // At least 500 bytes backup
                 }
-                _ => lit_pos,
+                _ => 0,
             };
+            let try_pos = lit_pos.saturating_sub(backup);
 
-            // Run Pike VM on a WINDOW around the literal, not the full remaining input.
-            // The match must start near the literal, so we only need a small region.
+            // Search window: generous on both sides
             let window_start = try_pos;
-            let window_end = (lit_pos + 500).min(text_bytes.len()); // 500 bytes past literal
+            let window_end = (lit_pos + 1000).min(text_bytes.len());
             let window = &text_bytes[window_start..window_end];
             let vm = pikevm::PikeVm::new(bytecode, window);
             match vm.exec(0) {
