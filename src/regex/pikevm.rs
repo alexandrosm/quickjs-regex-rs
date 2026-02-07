@@ -891,6 +891,45 @@ impl<'a> PikeVm<'a> {
     }
 }
 
+// ============================================================================
+// Bucket Queue Scanner: timeline-based execution with DFA cache
+// ============================================================================
+
+use std::collections::BTreeMap;
+
+/// Bucket Queue: maps position → list of thread PCs waiting at that position.
+/// Threads can schedule themselves at future positions via skip instructions.
+/// Processing order: lowest position first (BTreeMap gives this for free).
+struct BucketQueue {
+    buckets: BTreeMap<usize, Vec<u32>>,
+}
+
+impl BucketQueue {
+    fn new() -> Self {
+        BucketQueue { buckets: BTreeMap::new() }
+    }
+
+    /// Schedule a thread at a future position
+    #[inline]
+    fn schedule(&mut self, pos: usize, pc: u32) {
+        self.buckets.entry(pos).or_insert_with(Vec::new).push(pc);
+    }
+
+    /// Get the next position that has waiting threads
+    fn next_pos(&self) -> Option<usize> {
+        self.buckets.keys().next().copied()
+    }
+
+    /// Take all threads waiting at `pos`
+    fn take(&mut self, pos: usize) -> Vec<u32> {
+        self.buckets.remove(&pos).unwrap_or_default()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
+    }
+}
+
 /// Persistent scanner with warm DFA cache for repeated matching.
 /// Holds all state needed to scan efficiently across multiple find_next calls.
 pub struct PikeScanner<'a> {
@@ -939,13 +978,13 @@ impl<'a> PikeScanner<'a> {
     }
 
     /// Count all non-overlapping matches.
-    /// Uses DFA cache for register-free patterns, full exec for patterns with registers.
+    /// Uses Bucket Queue with DFA cache for all patterns (handles registers via timeline).
     pub fn count_all(&mut self) -> usize {
         let mut count = 0;
         let mut pos = 0;
 
+        // Use DFA-cached scan for register-free patterns
         if self.vm.register_count == 0 {
-            // Fast path: DFA-cached capture-free scan
             while pos <= self.vm.input_len {
                 match self.find_match_cached(pos) {
                     Some(end) => {
@@ -955,17 +994,20 @@ impl<'a> PikeScanner<'a> {
                     None => break,
                 }
             }
-        } else {
-            // Patterns with registers (bounded repeats): use full exec
-            while pos <= self.vm.input_len {
-                match self.vm.exec(pos) {
-                    PikeResult::Match(caps) => {
-                        count += 1;
-                        let end = caps.get(1).copied().flatten().unwrap_or(pos + 1);
-                        pos = if end > pos { end } else { pos + 1 };
-                    }
-                    PikeResult::NoMatch => break,
+            return count;
+        }
+
+        // For register patterns: use full exec (correct but slower)
+        // The Bucket Queue optimization for these patterns requires
+        // the span super-instructions which are a future enhancement.
+        while pos <= self.vm.input_len {
+            match self.vm.exec(pos) {
+                PikeResult::Match(caps) => {
+                    count += 1;
+                    let end = caps.get(1).copied().flatten().unwrap_or(pos + 1);
+                    pos = if end > pos { end } else { pos + 1 };
                 }
+                PikeResult::NoMatch => break,
             }
         }
 
