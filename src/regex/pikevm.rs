@@ -897,11 +897,17 @@ use std::cell::RefCell;
 /// Create via `Regex::create_scratch()`. Thread-local: do NOT share across threads.
 /// Each thread should have its own Scratch.
 pub struct Scratch {
+    // Exec buffers (for bounded exec pass 2)
     curr: ThreadList,
     next: ThreadList,
     eps_stack: Vec<EpsFrame>,
     tmp_caps: Vec<Option<usize>>,
     tmp_regs: Vec<usize>,
+    // DFA scan buffers (for pass 1)
+    dfa_curr_states: Vec<u32>,
+    dfa_next_states: Vec<u32>,
+    dfa_seen: Vec<bool>,
+    dfa_eps_stack: Vec<(usize, bool)>,
     /// Persistent DFA cache — survives across find_at calls for warm O(1)/byte scanning.
     dfa: RefCell<LazyDfa>,
 }
@@ -914,11 +920,60 @@ impl Scratch {
             eps_stack: Vec::with_capacity(64),
             tmp_caps: vec![None; capture_count * 2],
             tmp_regs: vec![0; register_count],
+            dfa_curr_states: Vec::with_capacity(128),
+            dfa_next_states: Vec::with_capacity(128),
+            dfa_seen: vec![false; num_pcs],
+            dfa_eps_stack: Vec::with_capacity(64),
             dfa: RefCell::new(LazyDfa::new()),
         }
     }
 
-    /// Access the persistent DFA cache (for PikeScanner::with_cache).
+    /// Two-pass find: DFA scan for match_end, bounded exec for (start, end).
+    /// All buffers reused from Scratch — zero allocation per call.
+    pub fn find_at(&mut self, vm: &PikeVm, start_pos: usize) -> Option<(usize, usize)> {
+        // Pass 1: DFA scan for match_end (O(1)/byte on warm cache)
+        let match_end = {
+            let mut dfa = self.dfa.borrow_mut();
+            PikeScanner::find_match_cached_inner(
+                vm, &mut dfa,
+                &mut self.dfa_curr_states, &mut self.dfa_next_states,
+                &mut self.dfa_seen, &mut self.dfa_eps_stack,
+                start_pos,
+            )
+        }?;
+
+        // Pass 2: bounded exec on input[..match_end] for match_start.
+        // Only processes ~match_length bytes, not the entire remaining text.
+        let bounded_vm = PikeVm::new(vm.bytecode, &vm.input[..match_end]);
+        match bounded_vm.exec_reuse(
+            &mut self.curr, &mut self.next,
+            &mut self.eps_stack, &mut self.tmp_caps, &mut self.tmp_regs,
+            start_pos,
+        ) {
+            PikeResult::Match(caps) => {
+                let s = caps.get(0).copied().flatten()?;
+                let e = caps.get(1).copied().flatten()?;
+                Some((s, e))
+            }
+            PikeResult::NoMatch => {
+                // Bounded exec disagrees — fall back to full exec
+                match vm.exec_reuse(
+                    &mut self.curr, &mut self.next,
+                    &mut self.eps_stack, &mut self.tmp_caps, &mut self.tmp_regs,
+                    start_pos,
+                ) {
+                    PikeResult::Match(caps) => {
+                        let s = caps.get(0).copied().flatten()?;
+                        let e = caps.get(1).copied().flatten()?;
+                        Some((s, e))
+                    }
+                    PikeResult::NoMatch => None,
+                }
+            }
+        }
+    }
+
+    /// Access the persistent DFA cache.
     pub fn dfa_cache(&self) -> &RefCell<LazyDfa> {
         &self.dfa
     }
@@ -1102,7 +1157,7 @@ impl<'a> PikeScanner<'a> {
     }
 
     /// Core DFA-cached scan logic, operating on a mutable DFA reference.
-    fn find_match_cached_inner(
+    pub(crate) fn find_match_cached_inner(
         vm: &PikeVm<'a>,
         dfa: &mut LazyDfa,
         curr_states: &mut Vec<u32>,
