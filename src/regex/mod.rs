@@ -2138,9 +2138,6 @@ impl Regex {
         };
 
         // Use Pike VM for captures when available (linear time, correct semantics)
-        if std::env::var("QUICKJS_DEBUG_CAPTURES").is_ok() {
-            eprintln!("[captures_at] use_pike_vm={} pattern={}", self.use_pike_vm, self.pattern);
-        }
         if self.use_pike_vm {
             let vm = pikevm::PikeVm::new(bytecode, text_bytes);
             return match vm.exec(start) {
