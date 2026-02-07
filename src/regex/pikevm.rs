@@ -938,20 +938,37 @@ impl<'a> PikeScanner<'a> {
         }
     }
 
-    /// Count all non-overlapping matches using the DFA cache.
-    /// This is the fastest path — no capture extraction, pure state-set transitions.
+    /// Count all non-overlapping matches.
+    /// Uses DFA cache for register-free patterns, full exec for patterns with registers.
     pub fn count_all(&mut self) -> usize {
         let mut count = 0;
         let mut pos = 0;
-        while pos <= self.vm.input_len {
-            match self.find_match_cached(pos) {
-                Some(end) => {
-                    count += 1;
-                    pos = if end > pos { end } else { pos + 1 };
+
+        if self.vm.register_count == 0 {
+            // Fast path: DFA-cached capture-free scan
+            while pos <= self.vm.input_len {
+                match self.find_match_cached(pos) {
+                    Some(end) => {
+                        count += 1;
+                        pos = if end > pos { end } else { pos + 1 };
+                    }
+                    None => break,
                 }
-                None => break,
+            }
+        } else {
+            // Patterns with registers (bounded repeats): use full exec
+            while pos <= self.vm.input_len {
+                match self.vm.exec(pos) {
+                    PikeResult::Match(caps) => {
+                        count += 1;
+                        let end = caps.get(1).copied().flatten().unwrap_or(pos + 1);
+                        pos = if end > pos { end } else { pos + 1 };
+                    }
+                    PikeResult::NoMatch => break,
+                }
             }
         }
+
         count
     }
 
