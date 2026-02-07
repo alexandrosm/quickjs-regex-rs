@@ -1969,31 +1969,20 @@ impl Regex {
 
     /// Scanner/Verifier: Bit VM scans for potential matches at O(N/64),
     /// Pike VM verifies each candidate with correct greedy/lazy semantics.
+    /// Count matches using Wide NFA directly — no Pike VM exec needed.
+    /// Uses find_match which tracks (start, end) in the NFA itself.
     fn count_matches_bit_scanner(&self, text: &str, prog: &bitvm::BitVmProgram) -> usize {
         let text_bytes = text.as_bytes();
-        let bytecode = self.bytecode_slice();
-
         let mut count = 0;
-        let mut scan_from = 0;
+        let mut pos = 0;
 
-        while scan_from < text_bytes.len() {
-            // Pass 1: Bit VM scans from scan_from for next potential match
-            if !prog.has_match(&text_bytes[scan_from..]) {
-                break; // No more matches possible
-            }
-
-            // Pass 2: Pike VM verifies and extracts exact match bounds
-            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-            match vm.exec(scan_from) {
-                pikevm::PikeResult::Match(caps) => {
+        while pos <= text_bytes.len() {
+            match prog.find_match(text_bytes, pos) {
+                Some((start, end)) => {
                     count += 1;
-                    let match_end = caps.get(1).copied().flatten().unwrap_or(scan_from + 1);
-                    let match_start = caps.get(0).copied().flatten().unwrap_or(scan_from);
-                    scan_from = if match_end > match_start { match_end } else { match_start + 1 };
+                    pos = if end > start { end } else { start + 1 };
                 }
-                pikevm::PikeResult::NoMatch => {
-                    break;
-                }
+                None => break,
             }
         }
 
@@ -2257,13 +2246,53 @@ impl Regex {
         self.captures_at(text, start)
     }
 
-    /// Get captures using pre-allocated scratch. Zero allocation per call.
+    /// Get captures using pre-allocated scratch. Uses Wide NFA to find match
+    /// bounds first, then bounded exec for capture extraction.
     pub fn captures_at_scratch(&self, text: &str, start: usize, scratch: &mut pikevm::Scratch) -> Option<Captures> {
         let text_bytes = text.as_bytes();
         let capture_count = self.capture_count();
         let bytecode = self.bytecode_slice();
 
         if self.use_pike_vm {
+            // Use Wide NFA to find match_end, then bounded exec for captures
+            if let Some(ref wide_nfa) = self.bit_program {
+                let match_end = wide_nfa.find_match_end(text_bytes, start)?;
+                let bounded_vm = pikevm::PikeVm::new(bytecode, &text_bytes[..match_end]);
+                return match bounded_vm.exec_with_scratch(scratch, start) {
+                    pikevm::PikeResult::Match(caps) => {
+                        let mut groups = Vec::with_capacity(capture_count);
+                        for i in 0..capture_count {
+                            let s = caps.get(i * 2).copied().flatten();
+                            let e = caps.get(i * 2 + 1).copied().flatten();
+                            match (s, e) {
+                                (Some(s), Some(e)) => groups.push(Some((s, e))),
+                                _ => groups.push(None),
+                            }
+                        }
+                        Some(Captures { text: text.to_string(), groups })
+                    }
+                    pikevm::PikeResult::NoMatch => {
+                        // Bounded exec disagrees — fall back to full exec
+                        let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+                        match vm.exec_with_scratch(scratch, start) {
+                            pikevm::PikeResult::Match(caps) => {
+                                let mut groups = Vec::with_capacity(capture_count);
+                                for i in 0..capture_count {
+                                    let s = caps.get(i * 2).copied().flatten();
+                                    let e = caps.get(i * 2 + 1).copied().flatten();
+                                    match (s, e) {
+                                        (Some(s), Some(e)) => groups.push(Some((s, e))),
+                                        _ => groups.push(None),
+                                    }
+                                }
+                                Some(Captures { text: text.to_string(), groups })
+                            }
+                            pikevm::PikeResult::NoMatch => None,
+                        }
+                    }
+                };
+            }
+            // No Wide NFA — full exec with scratch
             let vm = pikevm::PikeVm::new(bytecode, text_bytes);
             return match vm.exec_with_scratch(scratch, start) {
                 pikevm::PikeResult::Match(caps) => {
