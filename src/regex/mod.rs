@@ -4374,4 +4374,41 @@ mod tests {
         let m = re.find(&text).unwrap();
         assert_eq!(m.as_str(&text), "dog");
     }
+
+    #[test]
+    fn test_ruff_noqa_captures() {
+        let re = Regex::new(r"(\s*)((?:# [Nn][Oo][Qq][Aa])(?::\s?(([A-Z]+[0-9]+(?:[,\s]+)?)+))?)").unwrap();
+
+        // Bare # noqa — groups 3,4 should be None
+        let caps = re.captures("  # noqa").unwrap();
+        assert_eq!(caps.count_matched(), 3, "bare noqa: groups 0,1,2 should match, not 3,4");
+        assert!(caps.get(3).is_none(), "group 3 should be None for bare noqa");
+        assert!(caps.get(4).is_none(), "group 4 should be None for bare noqa");
+
+        // # noqa: E501 — all groups should match
+        let caps = re.captures("  # noqa: E501").unwrap();
+        assert_eq!(caps.count_matched(), 5, "noqa with code: all 5 groups should match");
+
+        // grep-captures model: count matched groups per line
+        let mut count = 0;
+        for line in ["  # noqa", "  # noqa: E501", "nothing here", "  # noqa: E501,F401"].iter() {
+            let mut pos = 0;
+            while pos < line.len() {
+                match re.captures_at(line, pos) {
+                    Some(caps) => {
+                        count += caps.count_matched();
+                        if let Some(m) = caps.get(0) {
+                            let end = m.end;
+                            let start = m.start;
+                            pos = if end > start { end } else { start + 1 };
+                        } else {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+        assert_eq!(count, 3 + 5 + 5, "grep-captures count should be 13");
+    }
 }
