@@ -60,11 +60,16 @@ mod op {
 
 /// Thread list maintaining strict priority order.
 /// Index 0 = highest priority. Sparse set prevents duplicate states.
+/// Uses generational indexing: `seen` stores the generation when each PC was
+/// last added. Checking `seen[pc] == generation` replaces a boolean lookup.
+/// `clear()` increments the generation in O(1) instead of touching every entry.
 struct ThreadList {
     /// Ordered list of (pc, slot_index) pairs
     threads: Vec<(u32, u32)>,
-    /// Sparse set: pc → true if already in list (dedup)
-    seen: Vec<bool>,
+    /// Generational sparse set: pc → generation when last seen
+    seen: Vec<u32>,
+    /// Current generation (incremented on clear)
+    generation: u32,
     /// Capture slots: each thread has capture_stride slots
     slots: Vec<Option<usize>>,
     /// Register values per thread
@@ -82,7 +87,8 @@ impl ThreadList {
         let max_threads = num_pcs.min(4096);
         ThreadList {
             threads: Vec::with_capacity(max_threads),
-            seen: vec![false; num_pcs],
+            seen: vec![0; num_pcs],
+            generation: 1, // Start at 1 so initial 0-filled seen is "unseen"
             slots: vec![None; max_threads * cs],
             regs: vec![0; max_threads * rs],
             capture_stride: cs,
@@ -91,22 +97,23 @@ impl ThreadList {
         }
     }
 
+    /// O(1) clear via generation bump. No memory touched.
+    #[inline]
     fn clear(&mut self) {
-        for &(pc, _) in &self.threads {
-            self.seen[pc as usize] = false;
-        }
         self.threads.clear();
         self.slot_cursor = 0;
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 { self.generation = 1; } // skip 0 (init value)
     }
 
     /// Add a thread. Returns false if state already occupied (shadowed).
     #[inline]
     fn add(&mut self, pc: u32, caps: &[Option<usize>], regs: &[usize]) -> bool {
         let pc_idx = pc as usize;
-        if pc_idx >= self.seen.len() || self.seen[pc_idx] {
+        if pc_idx >= self.seen.len() || self.seen[pc_idx] == self.generation {
             return false; // Shadowed by higher-priority thread
         }
-        self.seen[pc_idx] = true;
+        self.seen[pc_idx] = self.generation;
 
         let slot_idx = self.slot_cursor;
         self.slot_cursor += 1;
@@ -372,6 +379,15 @@ impl<'a> PikeVm<'a> {
         let mut tmp_caps = vec![None; self.capture_count * 2];
         let mut tmp_regs = vec![0usize; self.register_count];
         self.exec_inner(&mut curr, &mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, start_pos)
+    }
+
+    /// Full execution reusing shared Scratch (avoids per-call allocation).
+    pub fn exec_with_scratch(&self, scratch: &mut Scratch, start_pos: usize) -> PikeResult {
+        self.exec_reuse(
+            &mut scratch.curr, &mut scratch.next,
+            &mut scratch.eps_stack, &mut scratch.tmp_caps, &mut scratch.tmp_regs,
+            start_pos,
+        )
     }
 
     /// Full execution reusing pre-allocated buffers (avoids per-call allocation).
@@ -874,6 +890,31 @@ impl BucketQueue {
 }
 
 use std::cell::RefCell;
+
+/// Reusable scratch space for regex execution. Allocated once, passed to
+/// `find_at` / `captures_at` for zero-allocation matching on hot paths.
+///
+/// Create via `Regex::create_scratch()`. Thread-local: do NOT share across threads.
+/// Each thread should have its own Scratch.
+pub struct Scratch {
+    curr: ThreadList,
+    next: ThreadList,
+    eps_stack: Vec<EpsFrame>,
+    tmp_caps: Vec<Option<usize>>,
+    tmp_regs: Vec<usize>,
+}
+
+impl Scratch {
+    pub fn new(num_pcs: usize, capture_count: usize, register_count: usize) -> Self {
+        Scratch {
+            curr: ThreadList::new(num_pcs, capture_count, register_count),
+            next: ThreadList::new(num_pcs, capture_count, register_count),
+            eps_stack: Vec::with_capacity(64),
+            tmp_caps: vec![None; capture_count * 2],
+            tmp_regs: vec![0; register_count],
+        }
+    }
+}
 
 /// DFA cache storage: either owned by the scanner or borrowed from a Regex.
 enum DfaStorage<'a> {

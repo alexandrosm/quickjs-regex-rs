@@ -3,7 +3,7 @@ use std::io::Write;
 use {
     anyhow::Context,
     lexopt::{Arg, ValueExt},
-    quickjs_regex::{Flags, Regex},
+    quickjs_regex::{Flags, Regex, Scratch},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -117,13 +117,14 @@ fn model_count_spans(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
+    let mut scratch = re.create_scratch();
     timer::run(b, || {
         let mut sum = 0;
         let mut pos = 0;
         while pos < haystack.len() {
             let m = match mode {
                 Mode::Hybrid => re.find(&haystack[pos..]),
-                Mode::PureRust => re.find_at(haystack, pos),
+                Mode::PureRust => re.find_at_scratch(haystack, pos, &mut scratch),
                 Mode::CEngine => re.find_at_c_engine(haystack, pos),
             };
             match m {
@@ -148,13 +149,14 @@ fn model_count_captures(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
+    let mut scratch = re.create_scratch();
     timer::run(b, || {
         let mut count = 0;
         let mut pos = 0;
         while pos < haystack.len() {
             let caps = match mode {
                 Mode::Hybrid => re.captures(&haystack[pos..]),
-                Mode::PureRust => re.captures_at_pure_rust(haystack, pos),
+                Mode::PureRust => re.captures_at_scratch(haystack, pos, &mut scratch),
                 Mode::CEngine => re.captures_at(haystack, pos),
             };
             match caps {
@@ -188,12 +190,13 @@ fn model_grep(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
+    let mut scratch = re.create_scratch();
     timer::run(b, || {
         let mut count = 0;
         for line in haystack.lines() {
             let found = match mode {
                 Mode::Hybrid => re.find(line).is_some(),
-                Mode::PureRust => re.find_at(line, 0).is_some(),
+                Mode::PureRust => re.find_at_scratch(line, 0, &mut scratch).is_some(),
                 Mode::CEngine => re.find_at_c_engine(line, 0).is_some(),
             };
             if found {
@@ -210,6 +213,7 @@ fn model_grep_captures(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
+    let mut scratch = re.create_scratch();
     timer::run(b, || {
         let mut count = 0;
         for line in haystack.lines() {
@@ -217,7 +221,7 @@ fn model_grep_captures(
             while pos < line.len() {
                 let caps = match mode {
                     Mode::Hybrid => re.captures(&line[pos..]),
-                    Mode::PureRust => re.captures_at_pure_rust(line, pos),
+                    Mode::PureRust => re.captures_at_scratch(line, pos, &mut scratch),
                     Mode::CEngine => re.captures_at(line, pos),
                 };
                 match caps {

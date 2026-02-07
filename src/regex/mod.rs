@@ -46,8 +46,8 @@ pub(crate) mod engine;
 pub use opcodes::OpCode;
 pub use flags::{Flags, InvalidFlag};
 pub use error::{Error, Result, ExecResult};
+pub use pikevm::Scratch;
 
-use std::cell::RefCell;
 use std::ptr;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
@@ -774,8 +774,6 @@ pub struct Regex {
     ac_prefilter: Option<AhoCorasick>,
     /// Memmem finder for single-literal prefiltering
     memmem_prefilter: Option<memmem::Finder<'static>>,
-    /// Shared lazy DFA cache for Pike VM scanner (persists across find_at calls)
-    dfa_cache: RefCell<pikevm::LazyDfa>,
 }
 
 // Regex is Send + Sync since the bytecode is immutable after compilation
@@ -871,7 +869,6 @@ impl Regex {
             use_pike_vm: use_pike,
             ac_prefilter,
             memmem_prefilter,
-            dfa_cache: RefCell::new(pikevm::LazyDfa::new()),
         })
     }
 
@@ -1405,12 +1402,15 @@ impl Regex {
         let bytecode = self.bytecode_slice();
 
         if self.use_pike_vm {
-            // Use DFA-cached scanner — warms up across repeated calls
-            let mut scanner = pikevm::PikeScanner::with_cache(
-                bytecode, text_bytes, &self.dfa_cache,
-            );
-            return scanner.find_next(pos)
-                .map(|(s, e)| Match { start: s, end: e });
+            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+            match vm.exec(pos) {
+                pikevm::PikeResult::Match(caps) => {
+                    let start = caps.get(0).copied().flatten()?;
+                    let end = caps.get(1).copied().flatten()?;
+                    Some(Match { start, end })
+                }
+                pikevm::PikeResult::NoMatch => None,
+            }
         } else {
             let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
             match ctx.exec(pos) {
@@ -1673,15 +1673,9 @@ impl Regex {
     #[inline]
     /// Find using selective prefilter to skip to candidate positions.
     fn find_at_with_selective_prefilter(&self, text: &str, start: usize) -> Option<Match> {
-        // Pike VM: use DFA-cached scanner (warms up across calls)
+        // Pike VM has its own prefix loop — single call is enough
         if self.use_pike_vm {
-            let bytecode = self.bytecode_slice();
-            let text_bytes = text.as_bytes();
-            let mut scanner = pikevm::PikeScanner::with_cache(
-                bytecode, text_bytes, &self.dfa_cache,
-            );
-            return scanner.find_next(start)
-                .map(|(s, e)| Match { start: s, end: e });
+            return self.try_match_at(text, start);
         }
         let bytes = text.as_bytes();
         let mut search_from = start;
@@ -1729,14 +1723,7 @@ impl Regex {
 
     fn find_at_linear(&self, text: &str, start: usize) -> Option<Match> {
         if self.use_pike_vm {
-            // Use DFA-cached scanner for Pike VM patterns
-            let bytecode = self.bytecode_slice();
-            let text_bytes = text.as_bytes();
-            let mut scanner = pikevm::PikeScanner::with_cache(
-                bytecode, text_bytes, &self.dfa_cache,
-            );
-            return scanner.find_next(start)
-                .map(|(s, e)| Match { start: s, end: e });
+            return self.try_match_at(text, start);
         }
         let mut pos = start;
         while pos <= text.len() {
@@ -1903,6 +1890,92 @@ impl Regex {
         format!("{:?}", self.strategy)
     }
 
+    /// Create a reusable scratch space for this regex. Allocate once, pass to
+    /// `find_at` for zero-allocation matching. Each thread should own its own Scratch.
+    pub fn create_scratch(&self) -> pikevm::Scratch {
+        let bytecode = self.bytecode_slice();
+        let capture_count = bytecode[2] as usize;
+        let register_count = bytecode[3] as usize;
+        let body_len = u32::from_le_bytes([
+            bytecode[4], bytecode[5], bytecode[6], bytecode[7]
+        ]) as usize;
+        let num_pcs = 8 + body_len + 1;
+        pikevm::Scratch::new(num_pcs, capture_count, register_count)
+    }
+
+    /// Find the first match starting at or after `start`, using pre-allocated
+    /// scratch space. This is the fast path: zero allocation per call.
+    /// Create scratch via `regex.create_scratch()`. Each thread needs its own.
+    pub fn find_at_scratch(&self, text: &str, start: usize, scratch: &mut pikevm::Scratch) -> Option<Match> {
+        let text_bytes = text.as_bytes();
+        let len = text_bytes.len();
+
+        if len.saturating_sub(start) < OPTIMIZATION_THRESHOLD {
+            return self.find_at_linear_scratch(text, start, scratch);
+        }
+
+        if let Some(ref prog) = self.bit_program {
+            if !prog.has_match(&text_bytes[start..]) {
+                return None;
+            }
+        }
+
+        if len.saturating_sub(start) > 10_000 {
+            if matches!(self.selective_prefilter,
+                selective::Prefilter::MemmemStart(_) |
+                selective::Prefilter::MemmemInner { .. } |
+                selective::Prefilter::AhoCorasickStart(_) |
+                selective::Prefilter::AhoCorasickInner { .. }
+            ) {
+                return self.find_at_linear_scratch(text, start, scratch);
+            }
+        }
+
+        // Fast paths that don't need scratch (pure memchr / literal)
+        match &self.strategy {
+            SearchStrategy::PureLiteral(finder) => {
+                return finder.find(&text_bytes[start..])
+                    .map(|pos| Match { start: start + pos, end: start + pos + finder.len() });
+            }
+            SearchStrategy::AlternationLiterals { literals, ac } => {
+                return self.find_at_alternation_literals(text, start, literals, ac);
+            }
+            _ => {}
+        }
+
+        self.find_at_linear_scratch(text, start, scratch)
+    }
+
+    /// Core scratch-based linear scan for Pike VM.
+    fn find_at_linear_scratch(&self, text: &str, start: usize, scratch: &mut pikevm::Scratch) -> Option<Match> {
+        if self.use_pike_vm {
+            let bytecode = self.bytecode_slice();
+            let text_bytes = text.as_bytes();
+            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+            return match vm.exec_with_scratch(scratch, start) {
+                pikevm::PikeResult::Match(caps) => {
+                    let s = caps.get(0).copied().flatten()?;
+                    let e = caps.get(1).copied().flatten()?;
+                    Some(Match { start: s, end: e })
+                }
+                pikevm::PikeResult::NoMatch => None,
+            };
+        }
+        // Backtracker path
+        let mut pos = start;
+        while pos <= text.len() {
+            if let Some(m) = self.try_match_at(text, pos) {
+                return Some(m);
+            }
+            if pos < text.len() {
+                pos += text[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
     /// Count all non-overlapping matches efficiently.
     ///
     /// This is optimized for counting and uses native Aho-Corasick iteration
@@ -1944,16 +2017,16 @@ impl Regex {
                 break; // No more matches possible
             }
 
-            // Pass 2: DFA-cached scanner verifies and extracts exact match bounds
-            let mut scanner = pikevm::PikeScanner::with_cache(
-                bytecode, text_bytes, &self.dfa_cache,
-            );
-            match scanner.find_next(scan_from) {
-                Some((match_start, match_end)) => {
+            // Pass 2: Pike VM verifies and extracts exact match bounds
+            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+            match vm.exec(scan_from) {
+                pikevm::PikeResult::Match(caps) => {
                     count += 1;
+                    let match_end = caps.get(1).copied().flatten().unwrap_or(scan_from + 1);
+                    let match_start = caps.get(0).copied().flatten().unwrap_or(scan_from);
                     scan_from = if match_end > match_start { match_end } else { match_start + 1 };
                 }
-                None => {
+                pikevm::PikeResult::NoMatch => {
                     break;
                 }
             }
@@ -1980,8 +2053,8 @@ impl Regex {
             return self.count_matches_pike_prefiltered(text);
         }
 
-        // No useful prefilter — use DFA-cached scanner with shared cache
-        let mut scanner = pikevm::PikeScanner::with_cache(bytecode, text_bytes, &self.dfa_cache);
+        // No useful prefilter — use DFA-cached scanner
+        let mut scanner = pikevm::PikeScanner::new(bytecode, text_bytes);
         scanner.count_all()
     }
 
@@ -2153,18 +2226,7 @@ impl Regex {
         };
 
         // Use Pike VM for captures when available (linear time, correct semantics)
-        // DFA fast-scan to check if a match exists, then full exec for captures.
         if self.use_pike_vm {
-            // Quick DFA scan: if no match exists, skip the expensive exec
-            {
-                let mut scanner = pikevm::PikeScanner::with_cache(
-                    bytecode, text_bytes, &self.dfa_cache,
-                );
-                if scanner.find_next(start).is_none() {
-                    return None;
-                }
-            }
-            // Match exists — run full exec to extract captures
             let vm = pikevm::PikeVm::new(bytecode, text_bytes);
             return match vm.exec(start) {
                 pikevm::PikeResult::Match(caps) => {
@@ -2227,6 +2289,33 @@ impl Regex {
     /// Alias for captures_at — kept for API compatibility
     #[doc(hidden)]
     pub fn captures_at_pure_rust(&self, text: &str, start: usize) -> Option<Captures> {
+        self.captures_at(text, start)
+    }
+
+    /// Get captures using pre-allocated scratch. Zero allocation per call.
+    pub fn captures_at_scratch(&self, text: &str, start: usize, scratch: &mut pikevm::Scratch) -> Option<Captures> {
+        let text_bytes = text.as_bytes();
+        let capture_count = self.capture_count();
+        let bytecode = self.bytecode_slice();
+
+        if self.use_pike_vm {
+            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+            return match vm.exec_with_scratch(scratch, start) {
+                pikevm::PikeResult::Match(caps) => {
+                    let mut groups = Vec::with_capacity(capture_count);
+                    for i in 0..capture_count {
+                        let s = caps.get(i * 2).copied().flatten();
+                        let e = caps.get(i * 2 + 1).copied().flatten();
+                        match (s, e) {
+                            (Some(s), Some(e)) => groups.push(Some((s, e))),
+                            _ => groups.push(None),
+                        }
+                    }
+                    Some(Captures { text: text.to_string(), groups })
+                }
+                pikevm::PikeResult::NoMatch => None,
+            };
+        }
         self.captures_at(text, start)
     }
 }
