@@ -162,68 +162,71 @@ enum EpsFrame {
 // Pike VM
 // ============================================================================
 
-/// LRU-style transition cache: memoizes (thread_set, byte) → next_thread_set.
-/// This turns the Pike VM into a lazy DFA for hot paths.
-const CACHE_SIZE: usize = 65536; // 64K entries for large state sets
+/// Lazy DFA: assigns integer IDs to state sets and caches transitions.
+/// Each byte lookup is O(1) on cache hits: `transitions[state_id][byte]`.
+/// On cache misses, computes the transition via Pike VM and stores it.
+const MAX_DFA_STATES: usize = 8192;
 
-struct TransitionCache {
-    /// Key: hash of (sorted state IDs, input byte)
-    /// Value: sorted list of (pc, next_pc) transitions
-    entries: Vec<Option<CacheEntry>>,
+struct LazyDfa {
+    /// State set → state ID mapping
+    state_map: std::collections::HashMap<Vec<u32>, u32>,
+    /// Transition table: state_id × byte → next state_id (None = not yet computed)
+    transitions: Vec<[Option<u32>; 256]>,
+    /// State sets by ID (for epsilon closure on cache miss)
+    state_sets: Vec<Vec<u32>>,
+    /// Which states contain MATCH
+    has_match: Vec<bool>,
+    next_id: u32,
 }
 
-#[derive(Clone)]
-struct CacheEntry {
-    key_hash: u64,
-    state_key: Vec<u32>,   // PCs of current thread set (in priority order)
-    input_byte: u8,
-    /// The full next-state set (PCs in priority order after epsilon closure)
-    next_states: Vec<u32>,
-}
-
-impl TransitionCache {
+impl LazyDfa {
     fn new() -> Self {
-        TransitionCache {
-            entries: vec![None; CACHE_SIZE],
+        LazyDfa {
+            state_map: std::collections::HashMap::new(),
+            transitions: Vec::new(),
+            state_sets: Vec::new(),
+            has_match: Vec::new(),
+            next_id: 0,
         }
     }
 
+    /// Get or create a state ID for a given state set
+    fn get_or_create_state(&mut self, states: &[u32], contains_match: bool) -> Option<u32> {
+        if let Some(&id) = self.state_map.get(states) {
+            return Some(id);
+        }
+        if self.next_id as usize >= MAX_DFA_STATES {
+            return None; // Cache full
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.state_map.insert(states.to_vec(), id);
+        self.state_sets.push(states.to_vec());
+        self.transitions.push([None; 256]);
+        self.has_match.push(contains_match);
+        Some(id)
+    }
+
+    /// Look up a transition. Returns None if not cached yet.
     #[inline]
-    fn hash_key(states: &[u32], byte: u8) -> u64 {
-        // Fast hash: use length + first + last + middle + byte.
-        // Full state comparison on lookup handles collisions.
-        let len = states.len() as u64;
-        let first = states.first().copied().unwrap_or(0) as u64;
-        let last = states.last().copied().unwrap_or(0) as u64;
-        let mid = if states.len() > 2 { states[states.len() / 2] as u64 } else { 0 };
-        let mut h = len.wrapping_mul(0x9e3779b97f4a7c15);
-        h ^= first.wrapping_mul(0x517cc1b727220a95);
-        h ^= last.wrapping_mul(0x6c62272e07bb0142);
-        h ^= mid.wrapping_mul(0x62b821756295c58d);
-        h ^= (byte as u64).wrapping_mul(0x100000001b3);
-        h
+    fn lookup(&self, state_id: u32, byte: u8) -> Option<u32> {
+        self.transitions.get(state_id as usize)
+            .and_then(|t| t[byte as usize])
     }
 
-    fn lookup(&self, states: &[u32], byte: u8) -> Option<&CacheEntry> {
-        let hash = Self::hash_key(states, byte);
-        let idx = (hash as usize) % CACHE_SIZE;
-        if let Some(ref entry) = self.entries[idx] {
-            if entry.key_hash == hash && entry.input_byte == byte && entry.state_key == states {
-                return Some(entry);
-            }
+    /// Store a transition
+    fn store(&mut self, state_id: u32, byte: u8, next_state_id: u32) {
+        if let Some(t) = self.transitions.get_mut(state_id as usize) {
+            t[byte as usize] = Some(next_state_id);
         }
-        None
     }
 
-    fn insert(&mut self, states: Vec<u32>, byte: u8, next_states: Vec<u32>) {
-        let hash = Self::hash_key(&states, byte);
-        let idx = (hash as usize) % CACHE_SIZE;
-        self.entries[idx] = Some(CacheEntry {
-            key_hash: hash,
-            state_key: states,
-            input_byte: byte,
-            next_states,
-        });
+    fn state_has_match(&self, state_id: u32) -> bool {
+        self.has_match.get(state_id as usize).copied().unwrap_or(false)
+    }
+
+    fn get_state_set(&self, state_id: u32) -> &[u32] {
+        self.state_sets.get(state_id as usize).map(|v| v.as_slice()).unwrap_or(&[])
     }
 }
 
@@ -259,96 +262,18 @@ impl<'a> PikeVm<'a> {
         }
     }
 
-    /// Create a persistent scanner with a warm DFA cache for repeated matching.
+    /// Create a persistent scanner with lazy DFA for repeated matching.
     pub fn scanner(&self) -> PikeScanner<'a> {
-        PikeScanner {
-            vm: PikeVm::new(self.bytecode, self.input),
-            cache: TransitionCache::new(),
-            curr_states: Vec::with_capacity(128),
-            next_states: Vec::with_capacity(128),
-            seen: vec![false; self.num_pcs],
-            eps_stack: Vec::with_capacity(64),
-            state_key: Vec::with_capacity(64),
-        }
+        PikeScanner::new(self.bytecode, self.input)
     }
 
-    /// Capture-free execution: just returns whether a match exists and where it ends.
-    /// Uses the DFA transition cache for O(n) throughput on stable state sets.
+    /// Capture-free execution: just returns whether a match exists.
     pub fn find_match(&self, start_pos: usize) -> Option<usize> {
-        // Simplified thread list: just state IDs, no captures
-        let mut curr_states: Vec<u32> = Vec::with_capacity(128);
-        let mut next_states: Vec<u32> = Vec::with_capacity(128);
-        let mut seen = vec![false; self.num_pcs];
-        let mut eps_stack: Vec<(usize, bool)> = Vec::with_capacity(64); // (pc, is_restore)
-        let mut cache = TransitionCache::new();
-        let mut state_key: Vec<u32> = Vec::with_capacity(64);
-        let mut best_end: Option<usize> = None;
-
-        // Epsilon closure into curr_states (no captures)
-        self.eps_closure_fast(&mut curr_states, &mut seen, &mut eps_stack, RE_HEADER_LEN, start_pos);
-
-        let mut at = start_pos;
-        loop {
-            // Check for MATCH state
-            for &pc in &curr_states {
-                if (pc as usize) < self.bytecode.len() && self.bytecode[pc as usize] == op::MATCH {
-                    // Found a match ending at current position
-                    best_end = Some(at);
-                    // Don't break — continue to find the longest match at this start
-                }
-            }
-
-            if at >= self.input_len { break; }
-            if curr_states.is_empty() { break; }
-
-            let b = self.input[at];
-            let (c, char_len) = self.next_char(at);
-            if char_len == 0 { break; }
-
-            // Build state key for cache
-            state_key.clear();
-            state_key.extend_from_slice(&curr_states);
-
-            // Clear seen for next step
-            for &pc in &curr_states { seen[pc as usize] = false; }
-
-            // Cache lookup (ASCII only)
-            if let Some(entry) = cache.lookup(&state_key, b) {
-                next_states.clear();
-                next_states.extend_from_slice(&entry.next_states);
-                for &pc in &next_states { seen[pc as usize] = true; }
-            } else {
-                next_states.clear();
-
-                for &pc in &curr_states {
-                    let pc_usize = pc as usize;
-                    if pc_usize >= self.bytecode.len() { continue; }
-                    let opcode = self.bytecode[pc_usize];
-                    if let Some((next_pc, _)) = self.try_consume(pc_usize, opcode, at, c) {
-                        self.eps_closure_fast(&mut next_states, &mut seen, &mut eps_stack, next_pc, at + char_len);
-                    }
-                }
-
-                // Store in cache
-                cache.insert(state_key.clone(), b, next_states.clone());
-            }
-
-            // Swap (seen for curr will be cleared at top of next iteration)
-            std::mem::swap(&mut curr_states, &mut next_states);
-            at += char_len;
+        // For one-shot calls, use the full exec (it has the prefix loop)
+        match self.exec(start_pos) {
+            PikeResult::Match(caps) => caps.get(1).copied().flatten(),
+            PikeResult::NoMatch => None,
         }
-
-        // Final check
-        if best_end.is_none() {
-            for &pc in &curr_states {
-                if (pc as usize) < self.bytecode.len() && self.bytecode[pc as usize] == op::MATCH {
-                    best_end = Some(at);
-                    break;
-                }
-            }
-        }
-
-        best_end
     }
 
     /// Fast epsilon closure for capture-free mode: just collects terminal PCs.
@@ -443,8 +368,8 @@ impl<'a> PikeVm<'a> {
         let mut tmp_caps = vec![None; self.capture_count * 2];
         let mut tmp_regs = vec![0usize; self.register_count];
         let mut candidate: Option<Vec<Option<usize>>> = None;
-        let mut cache = TransitionCache::new();
-        let mut state_key: Vec<u32> = Vec::with_capacity(64);
+        
+        
 
         // Initialize: epsilon closure from bytecode start
         self.epsilon_closure(&mut curr, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, RE_HEADER_LEN, start_pos);
@@ -498,61 +423,28 @@ impl<'a> PikeVm<'a> {
             let (c, char_len) = self.next_char(at);
             if char_len == 0 { break; }
 
-            // Build state key for cache lookup (sorted PCs of current threads)
-            state_key.clear();
-            for &(pc, _) in &curr.threads {
-                state_key.push(pc);
-            }
+            for i in 0..curr.threads.len() {
+                let (pc, slot_idx) = curr.threads[i];
+                let pc_usize = pc as usize;
+                if pc_usize >= self.bytecode.len() { continue; }
 
-            // DFA cache disabled for now — needs separate capture-free execution path.
-            // The cache can't preserve captures across hits, which breaks match span detection.
-            // TODO: Add exec_count_only() that uses the cache for count/grep models.
-            let use_cache = false && c < 128 && self.register_count == 0;
-            let cache_hit = if use_cache {
-                cache.lookup(&state_key, c as u8).map(|e| e.next_states.clone())
-            } else {
-                None
-            };
-
-            if let Some(next_states) = cache_hit {
-                // Cache hit: skip ALL epsilon closure work.
-                // Just add each cached next-state as a terminal thread.
-                // Captures are not preserved across cache hits (fine for count/find models).
-                tmp_caps.fill(None);
-                for &pc in &next_states {
-                    next.add(pc, &tmp_caps, &tmp_regs);
-                }
-            } else {
-                // Cache miss: full computation
-                for i in 0..curr.threads.len() {
-                    let (pc, slot_idx) = curr.threads[i];
-                    let pc_usize = pc as usize;
-                    if pc_usize >= self.bytecode.len() { continue; }
-
-                    let opcode = self.bytecode[pc_usize];
-                    if let Some((next_pc, advance)) = self.try_consume(pc_usize, opcode, at, c) {
-                        let actual_advance = if advance > char_len { advance } else { char_len };
-                        let cs = curr.capture_stride;
-                        let src = slot_idx as usize * cs;
-                        for j in 0..cs.min(tmp_caps.len()) {
-                            tmp_caps[j] = curr.slots[src + j];
-                        }
-                        let rs = curr.reg_stride;
-                        if rs > 0 {
-                            let src_r = slot_idx as usize * rs;
-                            for j in 0..rs.min(tmp_regs.len()) {
-                                tmp_regs[j] = curr.regs[src_r + j];
-                            }
-                        }
-
-                        self.epsilon_closure(&mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, next_pc, at + actual_advance);
+                let opcode = self.bytecode[pc_usize];
+                if let Some((next_pc, advance)) = self.try_consume(pc_usize, opcode, at, c) {
+                    let actual_advance = if advance > char_len { advance } else { char_len };
+                    let cs = curr.capture_stride;
+                    let src = slot_idx as usize * cs;
+                    for j in 0..cs.min(tmp_caps.len()) {
+                        tmp_caps[j] = curr.slots[src + j];
                     }
-                }
+                    let rs = curr.reg_stride;
+                    if rs > 0 {
+                        let src_r = slot_idx as usize * rs;
+                        for j in 0..rs.min(tmp_regs.len()) {
+                            tmp_regs[j] = curr.regs[src_r + j];
+                        }
+                    }
 
-                // Store in cache
-                if use_cache {
-                    let next_pcs: Vec<u32> = next.threads.iter().map(|&(pc, _)| pc).collect();
-                    cache.insert(state_key.clone(), c as u8, next_pcs);
+                    self.epsilon_closure(&mut next, &mut eps_stack, &mut tmp_caps, &mut tmp_regs, next_pc, at + actual_advance);
                 }
             }
 
@@ -937,12 +829,11 @@ impl BucketQueue {
 /// Holds all state needed to scan efficiently across multiple find_next calls.
 pub struct PikeScanner<'a> {
     vm: PikeVm<'a>,
-    cache: TransitionCache,
+    dfa: LazyDfa,
     curr_states: Vec<u32>,
     next_states: Vec<u32>,
     seen: Vec<bool>,
     eps_stack: Vec<(usize, bool)>,
-    state_key: Vec<u32>,
 }
 
 impl<'a> PikeScanner<'a> {
@@ -951,12 +842,11 @@ impl<'a> PikeScanner<'a> {
         let num_pcs = vm.num_pcs;
         PikeScanner {
             vm,
-            cache: TransitionCache::new(),
+            dfa: LazyDfa::new(),
             curr_states: Vec::with_capacity(128),
             next_states: Vec::with_capacity(128),
             seen: vec![false; num_pcs],
             eps_stack: Vec::with_capacity(64),
-            state_key: Vec::with_capacity(64),
         }
     }
 
@@ -1017,92 +907,114 @@ impl<'a> PikeScanner<'a> {
         count
     }
 
-    /// Capture-free scan with persistent cache.
+    /// Capture-free scan with lazy DFA. O(1) per byte on cache hits.
     fn find_match_cached(&mut self, start_pos: usize) -> Option<usize> {
         self.curr_states.clear();
-        self.next_states.clear();
         self.seen.fill(false);
 
+        // Bootstrap: epsilon closure from start
         self.vm.eps_closure_fast(
             &mut self.curr_states, &mut self.seen, &mut self.eps_stack,
             RE_HEADER_LEN, start_pos,
         );
 
+        // Check if initial state has match
+        let init_has_match = self.curr_states.iter()
+            .any(|&pc| (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH);
+
+        // Register initial state in DFA
+        let mut current_dfa_state = match self.dfa.get_or_create_state(&self.curr_states, init_has_match) {
+            Some(id) => id,
+            None => {
+                // DFA cache full — fall back to uncached Pike VM
+                return self.find_match_uncached(start_pos);
+            }
+        };
+
         let mut at = start_pos;
         let mut best_end: Option<usize> = None;
 
         loop {
-            // Check for match — first thread to reach MATCH wins
-            let mut found_match = false;
-            for &pc in &self.curr_states {
-                if (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH {
-                    best_end = Some(at);
-                    found_match = true;
-                    break;
+            // Check for match
+            if self.dfa.state_has_match(current_dfa_state) {
+                best_end = Some(at);
+                // Check if MATCH is highest priority (first in state set)
+                let states = self.dfa.get_state_set(current_dfa_state);
+                if let Some(&first_pc) = states.first() {
+                    if (first_pc as usize) < self.vm.bytecode.len()
+                        && self.vm.bytecode[first_pc as usize] == op::MATCH
+                    {
+                        return best_end; // Highest priority match → immediate win
+                    }
                 }
             }
 
-            // If we found a match and no higher-priority threads could extend it,
-            // return immediately. We check: are there non-MATCH threads before the
-            // match thread? If no, the match is final.
-            if found_match {
-                // Check if any higher-priority (earlier) thread is still alive and not MATCH
-                let match_is_highest = self.curr_states.first()
-                    .map(|&pc| (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH)
-                    .unwrap_or(false);
-                if match_is_highest {
-                    return best_end;
-                }
-            }
-
-            if at >= self.vm.input_len || self.curr_states.is_empty() { break; }
+            if at >= self.vm.input_len { break; }
 
             let b = self.vm.input[at];
+            if b >= 128 {
+                // Non-ASCII: fall back to uncached for this segment
+                return best_end.or_else(|| self.find_match_uncached(at));
+            }
+
+            // O(1) DFA transition lookup
+            if let Some(next_id) = self.dfa.lookup(current_dfa_state, b) {
+                current_dfa_state = next_id;
+                at += 1;
+                continue;
+            }
+
+            // Cache miss: compute transition via Pike VM
+            let states = self.dfa.get_state_set(current_dfa_state).to_vec();
+            self.next_states.clear();
+            self.seen.fill(false);
+
             let (c, char_len) = self.vm.next_char(at);
             if char_len == 0 { break; }
 
-            // Clear seen for current states
-            for &pc in &self.curr_states { self.seen[pc as usize] = false; }
-
-            // Build cache key
-            self.state_key.clear();
-            self.state_key.extend_from_slice(&self.curr_states);
-
-            // Cache lookup
-            if let Some(entry) = self.cache.lookup(&self.state_key, b) {
-                self.next_states.clear();
-                self.next_states.extend_from_slice(&entry.next_states);
-                for &pc in &self.next_states { self.seen[pc as usize] = true; }
-            } else {
-                self.next_states.clear();
-                for &pc in &self.curr_states {
-                    let pc_usize = pc as usize;
-                    if pc_usize >= self.vm.bytecode.len() { continue; }
-                    let opcode = self.vm.bytecode[pc_usize];
-                    if let Some((next_pc, _)) = self.vm.try_consume(pc_usize, opcode, at, c) {
-                        self.vm.eps_closure_fast(
-                            &mut self.next_states, &mut self.seen, &mut self.eps_stack,
-                            next_pc, at + char_len,
-                        );
-                    }
+            for &pc in &states {
+                let pc_usize = pc as usize;
+                if pc_usize >= self.vm.bytecode.len() { continue; }
+                let opcode = self.vm.bytecode[pc_usize];
+                if let Some((next_pc, _)) = self.vm.try_consume(pc_usize, opcode, at, c) {
+                    self.vm.eps_closure_fast(
+                        &mut self.next_states, &mut self.seen, &mut self.eps_stack,
+                        next_pc, at + char_len,
+                    );
                 }
-                self.cache.insert(self.state_key.clone(), b, self.next_states.clone());
             }
 
-            std::mem::swap(&mut self.curr_states, &mut self.next_states);
+            let next_has_match = self.next_states.iter()
+                .any(|&pc| (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH);
+
+            match self.dfa.get_or_create_state(&self.next_states, next_has_match) {
+                Some(next_id) => {
+                    self.dfa.store(current_dfa_state, b, next_id);
+                    current_dfa_state = next_id;
+                }
+                None => {
+                    // DFA cache full
+                    return best_end.or_else(|| self.find_match_uncached(at));
+                }
+            }
+
             at += char_len;
         }
 
-        if best_end.is_none() {
-            for &pc in &self.curr_states {
-                if (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH {
-                    best_end = Some(at);
-                    break;
-                }
-            }
+        // Final check
+        if best_end.is_none() && self.dfa.state_has_match(current_dfa_state) {
+            best_end = Some(at);
         }
 
         best_end
+    }
+
+    /// Fallback uncached scan (for non-ASCII or DFA overflow)
+    fn find_match_uncached(&mut self, start_pos: usize) -> Option<usize> {
+        match self.vm.exec(start_pos) {
+            PikeResult::Match(caps) => caps.get(1).copied().flatten(),
+            PikeResult::NoMatch => None,
+        }
     }
 }
 
