@@ -418,13 +418,31 @@ pub fn derive_prefilter(info: &StaticInfo) -> Prefilter {
         return Prefilter::AnchoredStart;
     }
 
-    // Start bytes from static analysis — these are bytes that BEGIN a match
+    // PRIORITY 1: Required inner literals (most selective — memmem is fast)
+    if let Some(best) = info.required_literals.iter()
+        .max_by_key(|s| s.len())
+        .filter(|s| s.len() >= 3) // At least 3 chars to be worth memmem
+    {
+        let needle = best.as_bytes().to_vec();
+        let at_start = info.start_bytes.as_ref()
+            .map(|sb| sb.contains(&needle[0]))
+            .unwrap_or(false)
+            && info.min_length <= needle.len() + 4;
+
+        if at_start {
+            return Prefilter::MemmemStart(needle);
+        } else {
+            return Prefilter::MemmemInner {
+                needle,
+                min_prefix: info.min_length,
+            };
+        }
+    }
+
+    // PRIORITY 2: Start bytes (only if highly selective — single byte)
     if let Some(ref bytes) = info.start_bytes {
         if bytes.len() == 1 {
             return Prefilter::SingleByte(bytes[0]);
-        }
-        if bytes.len() <= 3 {
-            return Prefilter::ByteSet(bytes.clone());
         }
     }
 

@@ -328,6 +328,19 @@ mod tests {
     }
 
     #[test]
+    fn test_context_prefilter() {
+        let pattern = r"[A-Za-z]{10}\s+[\s\S]{0,100}Result[\s\S]{0,100}\s+[A-Za-z]{10}";
+        let re = crate::regex::Regex::with_flags(pattern, Flags::empty()).unwrap();
+        eprintln!("context prefilter: {:?}", re.selective_prefilter);
+        eprintln!("context use_pike: {}", re.use_pike_vm);
+        // Count on a small haystack with multiple matches
+        let hay = "abcdefghij blah Result blah klmnopqrst\nabcdefghij xx Result yy abcdefghij";
+        let count = re.count_matches(hay);
+        eprintln!("context count on small: {}", count);
+        assert!(count >= 1, "should find at least 1 match");
+    }
+
+    #[test]
     fn test_bounded_repeat_context() {
         // Progressively build up to full pattern
         assert!(compile_and_match(r"a[\s\S]{0,5}b", Flags::empty(), "a12345b"), "a..b");
