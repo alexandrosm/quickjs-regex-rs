@@ -167,7 +167,7 @@ enum EpsFrame {
 /// On cache misses, computes the transition via Pike VM and stores it.
 const MAX_DFA_STATES: usize = 8192;
 
-struct LazyDfa {
+pub struct LazyDfa {
     /// State set → state ID mapping
     state_map: std::collections::HashMap<Vec<u32>, u32>,
     /// Transition table: state_id × byte → next state_id (None = not yet computed)
@@ -180,7 +180,7 @@ struct LazyDfa {
 }
 
 impl LazyDfa {
-    fn new() -> Self {
+    pub fn new() -> Self {
         LazyDfa {
             state_map: std::collections::HashMap::new(),
             transitions: Vec::new(),
@@ -834,11 +834,19 @@ impl BucketQueue {
     }
 }
 
+use std::cell::RefCell;
+
+/// DFA cache storage: either owned by the scanner or borrowed from a Regex.
+enum DfaStorage<'a> {
+    Owned(LazyDfa),
+    Borrowed(&'a RefCell<LazyDfa>),
+}
+
 /// Persistent scanner with warm DFA cache for repeated matching.
 /// Holds all state needed to scan efficiently across multiple find_next calls.
 pub struct PikeScanner<'a> {
     vm: PikeVm<'a>,
-    dfa: LazyDfa,
+    dfa: DfaStorage<'a>,
     curr_states: Vec<u32>,
     next_states: Vec<u32>,
     seen: Vec<bool>,
@@ -851,7 +859,22 @@ impl<'a> PikeScanner<'a> {
         let num_pcs = vm.num_pcs;
         PikeScanner {
             vm,
-            dfa: LazyDfa::new(),
+            dfa: DfaStorage::Owned(LazyDfa::new()),
+            curr_states: Vec::with_capacity(128),
+            next_states: Vec::with_capacity(128),
+            seen: vec![false; num_pcs],
+            eps_stack: Vec::with_capacity(64),
+        }
+    }
+
+    /// Create a scanner that borrows a shared DFA cache from a Regex.
+    /// The DFA state map persists across calls, giving O(1) per byte on warm cache.
+    pub fn with_cache(bytecode: &'a [u8], input: &'a [u8], cache: &'a RefCell<LazyDfa>) -> Self {
+        let vm = PikeVm::new(bytecode, input);
+        let num_pcs = vm.num_pcs;
+        PikeScanner {
+            vm,
+            dfa: DfaStorage::Borrowed(cache),
             curr_states: Vec::with_capacity(128),
             next_states: Vec::with_capacity(128),
             seen: vec![false; num_pcs],
@@ -918,25 +941,58 @@ impl<'a> PikeScanner<'a> {
 
     /// Capture-free scan with lazy DFA. O(1) per byte on cache hits.
     fn find_match_cached(&mut self, start_pos: usize) -> Option<usize> {
-        self.curr_states.clear();
-        self.seen.fill(false);
+        match &self.dfa {
+            DfaStorage::Owned(_) => {
+                // Reborrow: take owned DFA mutably
+                let DfaStorage::Owned(ref mut dfa) = self.dfa else { unreachable!() };
+                Self::find_match_cached_inner(
+                    &self.vm, dfa,
+                    &mut self.curr_states, &mut self.next_states,
+                    &mut self.seen, &mut self.eps_stack,
+                    start_pos,
+                )
+            }
+            DfaStorage::Borrowed(cell) => {
+                let mut dfa = cell.borrow_mut();
+                Self::find_match_cached_inner(
+                    &self.vm, &mut dfa,
+                    &mut self.curr_states, &mut self.next_states,
+                    &mut self.seen, &mut self.eps_stack,
+                    start_pos,
+                )
+            }
+        }
+    }
+
+    /// Core DFA-cached scan logic, operating on a mutable DFA reference.
+    fn find_match_cached_inner(
+        vm: &PikeVm<'a>,
+        dfa: &mut LazyDfa,
+        curr_states: &mut Vec<u32>,
+        next_states: &mut Vec<u32>,
+        seen: &mut Vec<bool>,
+        eps_stack: &mut Vec<(usize, bool)>,
+        start_pos: usize,
+    ) -> Option<usize> {
+        curr_states.clear();
+        seen.fill(false);
 
         // Bootstrap: epsilon closure from start
-        self.vm.eps_closure_fast(
-            &mut self.curr_states, &mut self.seen, &mut self.eps_stack,
+        vm.eps_closure_fast(
+            curr_states, seen, eps_stack,
             RE_HEADER_LEN, start_pos,
         );
 
         // Check if initial state has match
-        let init_has_match = self.curr_states.iter()
-            .any(|&pc| (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH);
+        let init_has_match = curr_states.iter()
+            .any(|&pc| (pc as usize) < vm.bytecode.len() && vm.bytecode[pc as usize] == op::MATCH);
 
         // Register initial state in DFA
-        let mut current_dfa_state = match self.dfa.get_or_create_state(&self.curr_states, init_has_match) {
+        let mut current_dfa_state = match dfa.get_or_create_state(curr_states, init_has_match) {
             Some(id) => id,
             None => {
                 // DFA cache full — fall back to uncached Pike VM
-                return self.find_match_uncached(start_pos);
+                return Self::find_match_uncached_vm(vm, start_pos);
             }
         };
 
@@ -945,65 +1001,99 @@ impl<'a> PikeScanner<'a> {
 
         loop {
             // Check for match
-            if self.dfa.state_has_match(current_dfa_state) {
+            if dfa.state_has_match(current_dfa_state) {
                 best_end = Some(at);
                 // Check if MATCH is highest priority (first in state set)
-                let states = self.dfa.get_state_set(current_dfa_state);
+                let states = dfa.get_state_set(current_dfa_state);
                 if let Some(&first_pc) = states.first() {
-                    if (first_pc as usize) < self.vm.bytecode.len()
-                        && self.vm.bytecode[first_pc as usize] == op::MATCH
+                    if (first_pc as usize) < vm.bytecode.len()
+                        && vm.bytecode[first_pc as usize] == op::MATCH
                     {
                         return best_end; // Highest priority match → immediate win
                     }
                 }
             }
 
-            if at >= self.vm.input_len { break; }
+            if at >= vm.input_len { break; }
 
-            let b = self.vm.input[at];
+            let b = vm.input[at];
             if b >= 128 {
-                // Non-ASCII: fall back to uncached for this segment
-                return best_end.or_else(|| self.find_match_uncached(at));
+                // Non-ASCII: process this char via NFA (no DFA caching), then resume DFA
+                let (c, char_len) = vm.next_char(at);
+                if char_len == 0 { break; }
+
+                let states_vec = dfa.get_state_set(current_dfa_state).to_vec();
+                next_states.clear();
+                seen.fill(false);
+
+                for &pc in &states_vec {
+                    let pc_usize = pc as usize;
+                    if pc_usize >= vm.bytecode.len() { continue; }
+                    let opcode = vm.bytecode[pc_usize];
+                    if let Some((next_pc, _)) = vm.try_consume(pc_usize, opcode, at, c) {
+                        vm.eps_closure_fast(
+                            next_states, seen, eps_stack,
+                            next_pc, at + char_len,
+                        );
+                    }
+                }
+
+                let next_has_match = next_states.iter()
+                    .any(|&pc| (pc as usize) < vm.bytecode.len() && vm.bytecode[pc as usize] == op::MATCH);
+
+                match dfa.get_or_create_state(next_states, next_has_match) {
+                    Some(next_id) => {
+                        // Don't cache transition for non-ASCII first byte
+                        // (same first byte can produce different chars in different contexts)
+                        current_dfa_state = next_id;
+                    }
+                    None => {
+                        return best_end.or_else(|| Self::find_match_uncached_vm(vm, at));
+                    }
+                }
+
+                at += char_len;
+                continue;
             }
 
             // O(1) DFA transition lookup
-            if let Some(next_id) = self.dfa.lookup(current_dfa_state, b) {
+            if let Some(next_id) = dfa.lookup(current_dfa_state, b) {
                 current_dfa_state = next_id;
                 at += 1;
                 continue;
             }
 
             // Cache miss: compute transition via Pike VM
-            let states = self.dfa.get_state_set(current_dfa_state).to_vec();
-            self.next_states.clear();
-            self.seen.fill(false);
+            let states = dfa.get_state_set(current_dfa_state).to_vec();
+            next_states.clear();
+            seen.fill(false);
 
-            let (c, char_len) = self.vm.next_char(at);
+            let (c, char_len) = vm.next_char(at);
             if char_len == 0 { break; }
 
             for &pc in &states {
                 let pc_usize = pc as usize;
-                if pc_usize >= self.vm.bytecode.len() { continue; }
-                let opcode = self.vm.bytecode[pc_usize];
-                if let Some((next_pc, _)) = self.vm.try_consume(pc_usize, opcode, at, c) {
-                    self.vm.eps_closure_fast(
-                        &mut self.next_states, &mut self.seen, &mut self.eps_stack,
+                if pc_usize >= vm.bytecode.len() { continue; }
+                let opcode = vm.bytecode[pc_usize];
+                if let Some((next_pc, _)) = vm.try_consume(pc_usize, opcode, at, c) {
+                    vm.eps_closure_fast(
+                        next_states, seen, eps_stack,
                         next_pc, at + char_len,
                     );
                 }
             }
 
-            let next_has_match = self.next_states.iter()
-                .any(|&pc| (pc as usize) < self.vm.bytecode.len() && self.vm.bytecode[pc as usize] == op::MATCH);
+            let next_has_match = next_states.iter()
+                .any(|&pc| (pc as usize) < vm.bytecode.len() && vm.bytecode[pc as usize] == op::MATCH);
 
-            match self.dfa.get_or_create_state(&self.next_states, next_has_match) {
+            match dfa.get_or_create_state(next_states, next_has_match) {
                 Some(next_id) => {
-                    self.dfa.store(current_dfa_state, b, next_id);
+                    dfa.store(current_dfa_state, b, next_id);
                     current_dfa_state = next_id;
                 }
                 None => {
                     // DFA cache full
-                    return best_end.or_else(|| self.find_match_uncached(at));
+                    return best_end.or_else(|| Self::find_match_uncached_vm(vm, at));
                 }
             }
 
@@ -1011,7 +1101,7 @@ impl<'a> PikeScanner<'a> {
         }
 
         // Final check
-        if best_end.is_none() && self.dfa.state_has_match(current_dfa_state) {
+        if best_end.is_none() && dfa.state_has_match(current_dfa_state) {
             best_end = Some(at);
         }
 
@@ -1019,8 +1109,8 @@ impl<'a> PikeScanner<'a> {
     }
 
     /// Fallback uncached scan (for non-ASCII or DFA overflow)
-    fn find_match_uncached(&mut self, start_pos: usize) -> Option<usize> {
-        match self.vm.exec(start_pos) {
+    fn find_match_uncached_vm(vm: &PikeVm<'a>, start_pos: usize) -> Option<usize> {
+        match vm.exec(start_pos) {
             PikeResult::Match(caps) => caps.get(1).copied().flatten(),
             PikeResult::NoMatch => None,
         }

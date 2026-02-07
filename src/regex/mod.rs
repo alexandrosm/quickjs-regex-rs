@@ -47,6 +47,7 @@ pub use opcodes::OpCode;
 pub use flags::{Flags, InvalidFlag};
 pub use error::{Error, Result, ExecResult};
 
+use std::cell::RefCell;
 use std::ptr;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
@@ -773,6 +774,8 @@ pub struct Regex {
     ac_prefilter: Option<AhoCorasick>,
     /// Memmem finder for single-literal prefiltering
     memmem_prefilter: Option<memmem::Finder<'static>>,
+    /// Shared lazy DFA cache for Pike VM scanner (persists across find_at calls)
+    dfa_cache: RefCell<pikevm::LazyDfa>,
 }
 
 // Regex is Send + Sync since the bytecode is immutable after compilation
@@ -868,6 +871,7 @@ impl Regex {
             use_pike_vm: use_pike,
             ac_prefilter,
             memmem_prefilter,
+            dfa_cache: RefCell::new(pikevm::LazyDfa::new()),
         })
     }
 
@@ -1398,20 +1402,15 @@ impl Regex {
     #[inline]
     fn try_match_at(&self, text: &str, pos: usize) -> Option<Match> {
         let text_bytes = text.as_bytes();
-        let bytecode = unsafe {
-            std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
-        };
+        let bytecode = self.bytecode_slice();
 
         if self.use_pike_vm {
-            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-            match vm.exec(pos) {
-                pikevm::PikeResult::Match(caps) => {
-                    let start = caps.get(0).copied().flatten()?;
-                    let end = caps.get(1).copied().flatten()?;
-                    Some(Match { start, end })
-                }
-                pikevm::PikeResult::NoMatch => None,
-            }
+            // Use DFA-cached scanner — warms up across repeated calls
+            let mut scanner = pikevm::PikeScanner::with_cache(
+                bytecode, text_bytes, &self.dfa_cache,
+            );
+            return scanner.find_next(pos)
+                .map(|(s, e)| Match { start: s, end: e });
         } else {
             let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
             match ctx.exec(pos) {
@@ -1674,9 +1673,15 @@ impl Regex {
     #[inline]
     /// Find using selective prefilter to skip to candidate positions.
     fn find_at_with_selective_prefilter(&self, text: &str, start: usize) -> Option<Match> {
-        // Pike VM has its own prefix loop — single call is enough
+        // Pike VM: use DFA-cached scanner (warms up across calls)
         if self.use_pike_vm {
-            return self.try_match_at(text, start);
+            let bytecode = self.bytecode_slice();
+            let text_bytes = text.as_bytes();
+            let mut scanner = pikevm::PikeScanner::with_cache(
+                bytecode, text_bytes, &self.dfa_cache,
+            );
+            return scanner.find_next(start)
+                .map(|(s, e)| Match { start: s, end: e });
         }
         let bytes = text.as_bytes();
         let mut search_from = start;
@@ -1724,8 +1729,14 @@ impl Regex {
 
     fn find_at_linear(&self, text: &str, start: usize) -> Option<Match> {
         if self.use_pike_vm {
-            // Pike VM has its own prefix loop — single call scans the whole input
-            return self.try_match_at(text, start);
+            // Use DFA-cached scanner for Pike VM patterns
+            let bytecode = self.bytecode_slice();
+            let text_bytes = text.as_bytes();
+            let mut scanner = pikevm::PikeScanner::with_cache(
+                bytecode, text_bytes, &self.dfa_cache,
+            );
+            return scanner.find_next(start)
+                .map(|(s, e)| Match { start: s, end: e });
         }
         let mut pos = start;
         while pos <= text.len() {
@@ -1861,6 +1872,14 @@ impl Regex {
         Self::HEADER_LEN + body_len
     }
 
+    /// Get bytecode as a slice.
+    #[inline]
+    fn bytecode_slice(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
+        }
+    }
+
     /// Get the number of capture groups (including group 0). Pure Rust.
     pub fn capture_count(&self) -> usize {
         let header = unsafe {
@@ -1914,9 +1933,7 @@ impl Regex {
     /// Pike VM verifies each candidate with correct greedy/lazy semantics.
     fn count_matches_bit_scanner(&self, text: &str, prog: &bitvm::BitVmProgram) -> usize {
         let text_bytes = text.as_bytes();
-        let bytecode = unsafe {
-            std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
-        };
+        let bytecode = self.bytecode_slice();
 
         let mut count = 0;
         let mut scan_from = 0;
@@ -1927,16 +1944,16 @@ impl Regex {
                 break; // No more matches possible
             }
 
-            // Pass 2: Pike VM verifies and extracts exact match bounds
-            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-            match vm.exec(scan_from) {
-                pikevm::PikeResult::Match(caps) => {
+            // Pass 2: DFA-cached scanner verifies and extracts exact match bounds
+            let mut scanner = pikevm::PikeScanner::with_cache(
+                bytecode, text_bytes, &self.dfa_cache,
+            );
+            match scanner.find_next(scan_from) {
+                Some((match_start, match_end)) => {
                     count += 1;
-                    let match_end = caps.get(1).copied().flatten().unwrap_or(scan_from + 1);
-                    let match_start = caps.get(0).copied().flatten().unwrap_or(scan_from);
                     scan_from = if match_end > match_start { match_end } else { match_start + 1 };
                 }
-                pikevm::PikeResult::NoMatch => {
+                None => {
                     break;
                 }
             }
@@ -1949,9 +1966,7 @@ impl Regex {
     /// Uses memmem/AC to jump to candidate positions, then Pike VM to verify.
     fn count_matches_pike(&self, text: &str) -> usize {
         let text_bytes = text.as_bytes();
-        let bytecode = unsafe {
-            std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
-        };
+        let bytecode = self.bytecode_slice();
 
         // If we have a memmem or AC prefilter, use prefilter-accelerated counting
         let has_literal_prefilter = matches!(self.selective_prefilter,
@@ -1965,8 +1980,8 @@ impl Regex {
             return self.count_matches_pike_prefiltered(text);
         }
 
-        // No useful prefilter — use DFA-cached scanner
-        let mut scanner = pikevm::PikeScanner::new(bytecode, text_bytes);
+        // No useful prefilter — use DFA-cached scanner with shared cache
+        let mut scanner = pikevm::PikeScanner::with_cache(bytecode, text_bytes, &self.dfa_cache);
         scanner.count_all()
     }
 
@@ -2138,7 +2153,18 @@ impl Regex {
         };
 
         // Use Pike VM for captures when available (linear time, correct semantics)
+        // DFA fast-scan to check if a match exists, then full exec for captures.
         if self.use_pike_vm {
+            // Quick DFA scan: if no match exists, skip the expensive exec
+            {
+                let mut scanner = pikevm::PikeScanner::with_cache(
+                    bytecode, text_bytes, &self.dfa_cache,
+                );
+                if scanner.find_next(start).is_none() {
+                    return None;
+                }
+            }
+            // Match exists — run full exec to extract captures
             let vm = pikevm::PikeVm::new(bytecode, text_bytes);
             return match vm.exec(start) {
                 pikevm::PikeResult::Match(caps) => {
