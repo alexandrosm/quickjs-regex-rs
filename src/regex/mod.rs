@@ -34,6 +34,9 @@ pub mod selective;
 // Pike VM: thread-list based execution (linear time, no backtracking)
 pub mod pikevm;
 
+// Bit-parallel VM: wide-word interpreter for same bytecode (O(N/64) per byte)
+pub mod bitvm;
+
 // Legacy C engine modules — only needed for benchmark comparison via find_at_c_engine()
 #[allow(dead_code)]
 mod unicode;
@@ -749,6 +752,8 @@ impl std::fmt::Debug for SearchStrategy {
 
 /// A compiled regular expression
 pub struct Regex {
+    /// Bit-parallel program (compiled at construction time, if pattern fits)
+    bit_program: Option<bitvm::BitVmProgram>,
     /// The compiled bytecode (heap-allocated by C or Rust)
     bytecode: *mut u8,
     /// The original pattern (for Display)
@@ -838,7 +843,15 @@ impl Regex {
         // Skip Pike VM for Unicode mode (interpreter has special \w/\b Unicode handling).
         let use_pike = !info.has_backrefs && !final_flags.contains(Flags::UNICODE);
 
+        // Compile bit-parallel program if pattern is small enough
+        let bit_program = if use_pike {
+            bitvm::BitVmProgram::compile(&bytecode_vec)
+        } else {
+            None
+        };
+
         Ok(Regex {
+            bit_program,
             bytecode: bytecode_ptr,
             pattern: pattern.to_string(),
             flags: final_flags,
@@ -1863,7 +1876,11 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
-                // For Pike VM patterns: use prefilter-accelerated counting
+                // Bit-parallel VM: fastest path (O(N/64) per byte)
+                if let Some(ref prog) = self.bit_program {
+                    return prog.count_matches(text.as_bytes());
+                }
+                // Pike VM with prefilter acceleration
                 if self.use_pike_vm {
                     return self.count_matches_pike(text);
                 }
