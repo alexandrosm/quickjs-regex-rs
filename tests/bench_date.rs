@@ -6,31 +6,27 @@ fn test_date_wide_nfa() {
     let re = Regex::with_flags(pattern.trim(), Flags::from_bits(Flags::IGNORE_CASE)).unwrap();
     let mut scratch = re.create_scratch();
 
-    // Small: dense matches
-    let small = ("abcdef 2023-01-15 ghijkl ").repeat(100);
-    let t1 = std::time::Instant::now();
-    let mut c1 = 0; let mut p1 = 0;
-    while p1 < small.len() {
-        match re.find_at_scratch(&small, p1, &mut scratch) {
-            Some(m) => { c1 += 1; p1 = if m.end > m.start { m.end } else { m.start + 1 }; }
-            None => break,
-        }
-    }
-    eprintln!("small: {} matches in {:?} ({:.1}us/match, {:.2}us/byte)",
-        c1, t1.elapsed(), t1.elapsed().as_nanos() as f64 / c1 as f64 / 1000.0,
-        t1.elapsed().as_nanos() as f64 / small.len() as f64 / 1000.0);
+    // Try rebar haystack (Fly.io) or synthetic (local)
+    let hay = std::fs::read_to_string("/root/rebar/benchmarks/haystacks/rust-src-tools-3b0d4813.txt")
+        .ok()
+        .map(|s| s.lines().skip(189999).take(10000).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|| ("abcdef 2023-01-15 ghijkl ").repeat(100));
+    eprintln!("haystack: {} bytes", hay.len());
 
-    // Large: sparse matches in 200KB of text
-    let large = "x".repeat(100_000) + "2023-01-15 test" + &"y".repeat(100_000);
-    let t2 = std::time::Instant::now();
-    let mut c2 = 0; let mut p2 = 0;
-    while p2 < large.len() {
-        match re.find_at_scratch(&large, p2, &mut scratch) {
-            Some(m) => { c2 += 1; p2 = if m.end > m.start { m.end } else { m.start + 1 }; }
-            None => break,
+    // Measure 5 iterations like rebar would
+    for iter in 0..5 {
+        let t = std::time::Instant::now();
+        let mut count = 0usize;
+        let mut sum = 0usize;
+        let mut pos = 0;
+        while pos < hay.len() {
+            match re.find_at_scratch(&hay, pos, &mut scratch) {
+                Some(m) => { count += 1; sum += m.end - m.start; pos = if m.end > m.start { m.end } else { m.start + 1 }; }
+                None => break,
+            }
         }
+        eprintln!("iter {}: {} matches, sum={}, in {:?} ({:.2}us/byte)",
+            iter, count, sum, t.elapsed(),
+            t.elapsed().as_nanos() as f64 / hay.len() as f64 / 1000.0);
     }
-    eprintln!("large: {} matches in {:?} ({:.1}us/match, {:.2}us/byte)",
-        c2, t2.elapsed(), t2.elapsed().as_nanos() as f64 / c2.max(1) as f64 / 1000.0,
-        t2.elapsed().as_nanos() as f64 / large.len() as f64 / 1000.0);
 }
