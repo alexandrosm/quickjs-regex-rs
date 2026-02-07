@@ -14,7 +14,6 @@ enum Mode {
 }
 
 fn main() -> anyhow::Result<()> {
-    let _ = std::fs::write("/tmp/debug_main.txt", "main started\n");
     let mut p = lexopt::Parser::from_env();
     let (mut quiet, mut version) = (false, false);
     let mut mode = Mode::Hybrid;
@@ -47,17 +46,10 @@ fn main() -> anyhow::Result<()> {
     }
     let b = klv::Benchmark::read(std::io::stdin())
         .context("failed to read KLV data from <stdin>")?;
-    let _ = std::fs::write("/tmp/debug_klv.txt", format!("model={} mode={:?}\n", b.model, mode));
-    let compile_start = std::time::Instant::now();
     let samples = match b.model.as_str() {
         "compile" => model_compile(&b, mode)?,
         "count" => model_count(&b, &compile_with_mode(&b, mode)?, mode)?,
-        "count-spans" => {
-            let re = compile_with_mode(&b, mode)?;
-            let _ = std::fs::write("/tmp/debug_compile.txt",
-                format!("compiled in {:?}, strategy={}\n", compile_start.elapsed(), re.strategy_name()));
-            model_count_spans(&b, &re, mode)?
-        },
+        "count-spans" => model_count_spans(&b, &compile_with_mode(&b, mode)?, mode)?,
         "count-captures" => model_count_captures(&b, &compile_with_mode(&b, mode)?, mode)?,
         "grep" => model_grep(&b, &compile_with_mode(&b, mode)?, mode)?,
         "grep-captures" => model_grep_captures(&b, &compile_with_mode(&b, mode)?, mode)?,
@@ -126,11 +118,6 @@ fn model_count_spans(
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
     let mut scratch = re.create_scratch();
-    // DEBUG: write diagnostic before timer starts
-    if matches!(mode, Mode::PureRust) {
-        let _ = std::fs::write("/tmp/debug_wide.txt",
-            format!("haystack_len={} strategy={}\n", haystack.len(), re.strategy_name()));
-    }
     timer::run(b, || {
         let mut sum = 0;
         let mut pos = 0;
