@@ -839,9 +839,9 @@ impl Regex {
             _ => (None, None),
         };
 
-        // Use Pike VM for patterns without backreferences (guaranteed linear time).
-        // Skip Pike VM for Unicode mode (interpreter has special \w/\b Unicode handling).
-        let use_pike = !info.has_backrefs && !final_flags.contains(Flags::UNICODE);
+        // Use Pike VM for patterns without backreferences or lookaround (guaranteed linear time).
+        // Pike VM already handles Unicode word chars via is_alphanumeric().
+        let use_pike = !info.has_backrefs && !info.has_lookahead;
 
         // Compile bit-parallel program if pattern fits and has no registers
         // (registers control loop termination which bit VM can't handle)
@@ -2137,6 +2137,30 @@ impl Regex {
             std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
         };
 
+        // Use Pike VM for captures when available (linear time, correct semantics)
+        if self.use_pike_vm {
+            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+            return match vm.exec(start) {
+                pikevm::PikeResult::Match(caps) => {
+                    let mut groups = Vec::with_capacity(capture_count);
+                    for i in 0..capture_count {
+                        let s = caps.get(i * 2).copied().flatten();
+                        let e = caps.get(i * 2 + 1).copied().flatten();
+                        match (s, e) {
+                            (Some(s), Some(e)) => groups.push(Some((s, e))),
+                            _ => groups.push(None),
+                        }
+                    }
+                    Some(Captures {
+                        text: text.to_string(),
+                        groups,
+                    })
+                }
+                pikevm::PikeResult::NoMatch => None,
+            };
+        }
+
+        // Fallback: backtracking interpreter (for patterns with backreferences)
         let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
 
         let mut pos = start;

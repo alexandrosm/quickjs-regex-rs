@@ -237,6 +237,7 @@ pub struct PikeVm<'a> {
     capture_count: usize,
     register_count: usize,
     num_pcs: usize,
+    unicode_mode: bool,
 }
 
 pub enum PikeResult {
@@ -246,6 +247,8 @@ pub enum PikeResult {
 
 impl<'a> PikeVm<'a> {
     pub fn new(bytecode: &'a [u8], input: &'a [u8]) -> Self {
+        let flags = u16::from_le_bytes([bytecode[0], bytecode[1]]);
+        let unicode_mode = (flags & 0x10) != 0; // Flags::UNICODE = 1 << 4
         let capture_count = bytecode[RE_HEADER_CAPTURE_COUNT] as usize;
         let register_count = bytecode[RE_HEADER_CAPTURE_COUNT + 1] as usize;
         let bc_len = u32::from_le_bytes([
@@ -259,6 +262,7 @@ impl<'a> PikeVm<'a> {
             capture_count,
             register_count,
             num_pcs: RE_HEADER_LEN + bc_len + 1,
+            unicode_mode,
         }
     }
 
@@ -662,8 +666,13 @@ impl<'a> PikeVm<'a> {
             op::NOT_SPACE => { if !is_space(c) { Some((pc + 1, char_len)) } else { None } }
             op::RANGE | op::RANGE_I => {
                 let n = self.read_u16(pc + 1) as usize;
-                let check = if opcode == op::RANGE_I { to_lower(c) } else { c };
-                if self.check_range16(check, pc + 3, n) { Some((pc + 3 + n * 4, char_len)) } else { None }
+                let matched = if self.unicode_mode && is_word_range16(self.bytecode, pc + 3, n) {
+                    is_word_char_unicode(c)
+                } else {
+                    let check = if opcode == op::RANGE_I { to_lower(c) } else { c };
+                    self.check_range16(check, pc + 3, n)
+                };
+                if matched { Some((pc + 3 + n * 4, char_len)) } else { None }
             }
             op::RANGE32 | op::RANGE32_I => {
                 let n = self.read_u16(pc + 1) as usize;
@@ -1032,6 +1041,29 @@ impl<'a> PikeScanner<'a> {
     let b = input[pos];
     if b < 0x80 { b.is_ascii_alphanumeric() || b == b'_' }
     else { std::str::from_utf8(&input[pos..]).ok().and_then(|s| s.chars().next()).map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) }
+}
+
+/// Detect if a Range16 bytecode is the \w character class pattern
+#[inline] fn is_word_range16(bytecode: &[u8], data_start: usize, pair_count: usize) -> bool {
+    pair_count == 4 && data_start + 16 <= bytecode.len()
+        && bytecode[data_start..data_start + 16] == [
+            0x30, 0x00, 0x39, 0x00,  // 0-9
+            0x41, 0x00, 0x5A, 0x00,  // A-Z
+            0x5F, 0x00, 0x5F, 0x00,  // _
+            0x61, 0x00, 0x7A, 0x00,  // a-z
+        ]
+}
+
+/// Unicode-aware word character check (ID_Continue-like)
+#[inline] fn is_word_char_unicode(c: u32) -> bool {
+    if c < 128 {
+        (c >= b'0' as u32 && c <= b'9' as u32)
+            || (c >= b'A' as u32 && c <= b'Z' as u32)
+            || c == b'_' as u32
+            || (c >= b'a' as u32 && c <= b'z' as u32)
+    } else {
+        char::from_u32(c).map(|ch| ch.is_alphanumeric() || ch == '_').unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
