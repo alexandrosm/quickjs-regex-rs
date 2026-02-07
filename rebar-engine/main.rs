@@ -122,8 +122,9 @@ fn model_count_spans(
     if matches!(mode, Mode::PureRust) {
         let start_time = std::time::Instant::now();
         let m = re.find_at_scratch(haystack, 0, &mut scratch);
-        eprintln!("[DEBUG] first find_at_scratch: {:?} in {:?}, haystack={}",
-            m, start_time.elapsed(), haystack.len());
+        let _ = std::fs::write("/tmp/debug_wide.txt",
+            format!("first find_at_scratch: {:?} in {:?}, haystack={}\n",
+                m, start_time.elapsed(), haystack.len()));
     }
     timer::run(b, || {
         let mut sum = 0;
