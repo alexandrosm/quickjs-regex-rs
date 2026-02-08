@@ -1053,6 +1053,9 @@ pub struct Scratch {
     dfa_eps_stack: Vec<(usize, bool)>,
     /// Persistent DFA cache — survives across find_at calls for warm O(1)/byte scanning.
     dfa: RefCell<LazyDfa>,
+    // Wide NFA buffers (for find_match_end_reuse — zero alloc per call)
+    pub wide_curr: super::bitvm::BitState,
+    pub wide_next: super::bitvm::BitState,
 }
 
 impl Scratch {
@@ -1068,6 +1071,8 @@ impl Scratch {
             dfa_seen: vec![false; num_pcs],
             dfa_eps_stack: Vec::with_capacity(64),
             dfa: RefCell::new(LazyDfa::with_classes(bytecode)),
+            wide_curr: super::bitvm::BitState::new(0),
+            wide_next: super::bitvm::BitState::new(0),
         }
     }
 
@@ -1075,7 +1080,7 @@ impl Scratch {
     /// Pass 1: Wide NFA scans at O(states/64)/byte — finds where a match ends.
     /// Pass 2: Bounded exec on input[..match_end] — correct greedy/lazy/assertion semantics.
     pub fn find_at(&mut self, vm: &PikeVm, wide_nfa: &super::bitvm::BitVmProgram, start_pos: usize) -> Option<(usize, usize)> {
-        let match_end = wide_nfa.find_match_end(vm.input, start_pos)?;
+        let match_end = wide_nfa.find_match_end_reuse(vm.input, start_pos, &mut self.wide_curr, &mut self.wide_next)?;
 
         let bounded_vm = PikeVm::new(vm.bytecode, &vm.input[..match_end]);
         match bounded_vm.exec_reuse(

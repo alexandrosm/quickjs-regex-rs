@@ -50,12 +50,12 @@ mod op {
 /// Dynamic-width bit set for NFA state tracking.
 /// Supports arbitrarily large state counts (not limited to 1024).
 #[derive(Clone)]
-struct BitState {
-    words: Vec<u64>,
+pub struct BitState {
+    pub words: Vec<u64>,
 }
 
 impl BitState {
-    fn new(num_states: usize) -> Self {
+    pub fn new(num_states: usize) -> Self {
         let num_words = (num_states + 63) / 64;
         BitState {
             words: vec![0u64; num_words],
@@ -563,14 +563,31 @@ impl BitVmProgram {
         count
     }
 
-    /// Find the end position of the leftmost match starting at or after `start_pos`.
-    /// Returns None if no match. Wide NFA with precomputed initial contributions:
-    /// initial states (~500 for date regex) are handled via O(1) table lookup.
-    /// Only non-initial states (mid-match, ~20-50) need per-state closure processing.
-    pub fn find_match_end(&self, input: &[u8], start_pos: usize) -> Option<usize> {
+    /// Find match end, reusing pre-allocated buffers (zero allocation per call).
+    pub fn find_match_end_reuse(&self, input: &[u8], start_pos: usize, curr: &mut BitState, next: &mut BitState) -> Option<usize> {
         let w = self.num_words;
+        // Ensure buffers are the right size (resize once, reuse forever)
+        if curr.words.len() != w {
+            curr.words.resize(w, 0);
+        }
+        if next.words.len() != w {
+            next.words.resize(w, 0);
+        }
+        // Initialize curr from initial_state (copy, no alloc)
+        curr.words.copy_from_slice(&self.initial_state.words);
+        self.find_match_end_inner(input, start_pos, curr, next)
+    }
+
+    /// Find the end position of the leftmost match starting at or after `start_pos`.
+    /// Allocating version (for callers without pre-allocated buffers).
+    pub fn find_match_end(&self, input: &[u8], start_pos: usize) -> Option<usize> {
         let mut curr = self.initial_state.clone();
         let mut next = BitState::new(self.num_states);
+        self.find_match_end_inner(input, start_pos, &mut curr, &mut next)
+    }
+
+    fn find_match_end_inner(&self, input: &[u8], start_pos: usize, curr: &mut BitState, next: &mut BitState) -> Option<usize> {
+        let w = self.num_words;
         let mut best_end: Option<usize> = None;
 
         if curr.any_set(&self.match_mask) {
@@ -650,7 +667,7 @@ impl BitVmProgram {
                 break;
             }
 
-            std::mem::swap(&mut curr, &mut next);
+            std::mem::swap(curr, next);
         }
 
         best_end
