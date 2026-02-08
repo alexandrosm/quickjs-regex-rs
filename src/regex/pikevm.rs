@@ -935,7 +935,16 @@ impl<'a> PikeVm<'a> {
         if pos >= self.input_len { return (0, 0); }
         let b = self.input[pos];
         if b < 0x80 { return (b as u32, 1); }
-        std::str::from_utf8(&self.input[pos..]).ok()
+        // Decode UTF-8 without validating the entire remaining text (was O(N²))
+        let len = match b {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => return (b as u32, 1), // invalid UTF-8 lead byte
+        };
+        if pos + len > self.input_len { return (b as u32, 1); }
+        // Decode only the needed bytes
+        std::str::from_utf8(&self.input[pos..pos + len]).ok()
             .and_then(|s| s.chars().next())
             .map(|ch| (ch as u32, ch.len_utf8()))
             .unwrap_or((b as u32, 1))
