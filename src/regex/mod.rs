@@ -2050,10 +2050,15 @@ impl Regex {
             }
             _ => {
                 if self.use_pike_vm {
-                    // For large patterns (>1000 NFA states): use Wide NFA to avoid
-                    // DFA state overflow. E.g., noseyparker with 96 alternatives.
+                    // Use Wide NFA for large patterns to avoid DFA overflow.
+                    // Use PikeScanner for small patterns (DFA is more accurate).
                     if let Some(ref prog) = self.bit_program {
-                        if prog.num_states > 100 {
+                        let bytecode = self.bytecode_slice();
+                        let bc_body_len = u32::from_le_bytes([
+                            bytecode[4], bytecode[5], bytecode[6], bytecode[7],
+                        ]) as usize;
+                        // Large bytecode = many states = DFA will overflow
+                        if bc_body_len > 2000 {
                             return self.count_matches_bit_scanner(text, prog);
                         }
                     }
