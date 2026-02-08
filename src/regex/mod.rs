@@ -2050,16 +2050,13 @@ impl Regex {
             }
             _ => {
                 if self.use_pike_vm {
-                    // For patterns with registers: use Wide NFA (no DFA state explosion)
-                    // + bounded exec. The PikeScanner DFA overflows for 96-pattern
-                    // alternations like noseyparker.
-                    let reg_count = self.bytecode_slice()[3] as usize;
-                    if reg_count > 0 {
-                        if let Some(ref prog) = self.bit_program {
+                    // For large patterns (>1000 NFA states): use Wide NFA to avoid
+                    // DFA state overflow. E.g., noseyparker with 96 alternatives.
+                    if let Some(ref prog) = self.bit_program {
+                        if prog.num_states > 1000 {
                             return self.count_matches_bit_scanner(text, prog);
                         }
                     }
-                    // For register-free: PikeScanner DFA (correct, fast for simple patterns)
                     return self.count_matches_pike(text);
                 }
                 self.find_iter(text).count()

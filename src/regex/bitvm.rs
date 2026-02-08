@@ -155,7 +155,7 @@ pub struct BitVmProgram {
     /// Dense closures (kept for count_matches which needs the old API)
     epsilon_closure: Vec<BitState>, // [num_states]
     /// Number of NFA states (bytecode PCs that are consuming instructions)
-    num_states: usize,
+    pub num_states: usize,
     /// Mapping: NFA state index → bytecode PC
     state_to_pc: Vec<usize>,
     /// Mapping: bytecode PC → NFA state index (or usize::MAX if not a state)
