@@ -1083,8 +1083,9 @@ impl<'a> PikeScanner<'a> {
         let mut count = 0;
         let mut pos = 0;
 
-        // Use DFA-cached scan for register-free patterns
-        if self.vm.register_count == 0 {
+        // Use DFA-cached scan for register-free ASCII-safe patterns.
+        // Unicode mode patterns need exec_reuse (DFA allocates per non-ASCII byte).
+        if self.vm.register_count == 0 && !self.vm.unicode_mode {
             while pos <= self.vm.input_len {
                 match self.find_match_cached(pos) {
                     Some(end) => {

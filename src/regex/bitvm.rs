@@ -190,13 +190,29 @@ impl BitVmProgram {
 
             // Bail on CHAR32/RANGE32 with values > 255: can't handle multi-byte
             // Unicode characters in the byte-level NFA. Fall back to Pike VM.
-            if opcode == op::CHAR32 {
+            // Bail on any character value > 255: can't handle multi-byte
+            // Unicode characters in the byte-level NFA.
+            if opcode == op::CHAR || opcode == op::CHAR_I {
+                let val = u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]);
+                if val > 255 { return None; }
+            }
+            if opcode == op::CHAR32 || opcode == 4 /* CHAR32_I */ {
                 let val = u32::from_le_bytes([
                     bytecode[pc + 1], bytecode[pc + 2], bytecode[pc + 3], bytecode[pc + 4],
                 ]);
                 if val > 255 { return None; }
             }
-            if opcode == op::RANGE32 {
+            if opcode == op::RANGE || opcode == op::RANGE_I {
+                let pair_count = u16::from_le_bytes([
+                    bytecode[pc + 1], bytecode[pc + 2],
+                ]) as usize;
+                for i in 0..pair_count {
+                    let base = pc + 3 + i * 4;
+                    let hi = u16::from_le_bytes([bytecode[base + 2], bytecode[base + 3]]);
+                    if hi > 255 { return None; }
+                }
+            }
+            if opcode == op::RANGE32 || opcode == 39 /* RANGE32_I */ {
                 let pair_count = u16::from_le_bytes([
                     bytecode[pc + 1], bytecode[pc + 2],
                 ]) as usize;

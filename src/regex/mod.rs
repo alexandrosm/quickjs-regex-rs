@@ -1923,8 +1923,18 @@ impl Regex {
                 return scratch.find_at(&vm, wide_nfa, start)
                     .map(|(s, e)| Match { start: s, end: e });
             }
-            // Fallback: direct exec (for patterns without Wide NFA, e.g. lookahead)
-            return self.try_match_at(text, start);
+            // Fallback: exec with scratch (reuse buffers, no fresh allocation)
+            let bytecode = self.bytecode_slice();
+            let text_bytes = text.as_bytes();
+            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+            return match vm.exec_with_scratch(scratch, start) {
+                pikevm::PikeResult::Match(caps) => {
+                    let s = caps.get(0).copied().flatten()?;
+                    let e = caps.get(1).copied().flatten()?;
+                    Some(Match { start: s, end: e })
+                }
+                pikevm::PikeResult::NoMatch => None,
+            };
         }
         // Backtracker path
         let mut pos = start;
@@ -1958,10 +1968,8 @@ impl Regex {
                 if let Some(ref prog) = self.bit_program {
                     return self.count_matches_bit_scanner(text, prog);
                 }
-                // Pike VM fallback (patterns without Wide NFA: lookahead, CHAR32, etc.)
-                if self.use_pike_vm {
-                    return self.count_matches_pike(text);
-                }
+                // Fallback: find_iter (PikeScanner with own DFA + exec per match)
+                // Used for patterns without Wide NFA (lookahead, CHAR32, etc.)
                 self.find_iter(text).count()
             }
         }
