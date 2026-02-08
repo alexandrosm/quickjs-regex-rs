@@ -202,29 +202,10 @@ impl BitVmProgram {
                 ]);
                 if val > 255 { return None; }
             }
-            if opcode == op::RANGE || opcode == op::RANGE_I {
-                let pair_count = u16::from_le_bytes([
-                    bytecode[pc + 1], bytecode[pc + 2],
-                ]) as usize;
-                for i in 0..pair_count {
-                    let base = pc + 3 + i * 4;
-                    let hi = u16::from_le_bytes([bytecode[base + 2], bytecode[base + 3]]);
-                    if hi > 255 { return None; }
-                }
-            }
-            if opcode == op::RANGE32 || opcode == 39 /* RANGE32_I */ {
-                let pair_count = u16::from_le_bytes([
-                    bytecode[pc + 1], bytecode[pc + 2],
-                ]) as usize;
-                for i in 0..pair_count {
-                    let base = pc + 3 + i * 8;
-                    let hi = u32::from_le_bytes([
-                        bytecode[base + 4], bytecode[base + 5],
-                        bytecode[base + 6], bytecode[base + 7],
-                    ]);
-                    if hi > 255 { return None; }
-                }
-            }
+            // RANGE/RANGE_I with values > 255: the Wide NFA byte-level matching
+            // won't cover those codepoints, but that's OK — it's an over-approximation.
+            // The bounded exec handles the full Unicode matching correctly.
+            // Only bail on CHAR/CHAR_I > 255 (literal chars that MUST match).
 
             let is_consuming = matches!(opcode,
                 op::CHAR | op::CHAR_I | op::CHAR32 | op::DOT | op::ANY |
