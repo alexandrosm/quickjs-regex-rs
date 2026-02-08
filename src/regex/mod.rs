@@ -1915,27 +1915,17 @@ impl Regex {
     /// All buffers in Scratch — zero allocation per call. DFA cache warms across calls.
     fn find_at_linear_scratch(&self, text: &str, start: usize, scratch: &mut pikevm::Scratch) -> Option<Match> {
         if self.use_pike_vm {
-            if let Some(ref wide_nfa) = self.bit_program {
-                // Two-pass: Wide NFA (O(states/64)/byte) + bounded exec
-                let bytecode = self.bytecode_slice();
-                let text_bytes = text.as_bytes();
-                let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-                if let Some((s, e)) = scratch.find_at(&vm, wide_nfa, start) {
-                    return Some(Match { start: s, end: e });
+            // For Unicode mode, skip Wide NFA (byte-level NFA can't match non-ASCII
+            // chars like Cyrillic \w). Go straight to exec.
+            if !self.flags.contains(Flags::UNICODE) {
+                if let Some(ref wide_nfa) = self.bit_program {
+                    // Two-pass: Wide NFA (O(states/64)/byte) + bounded exec
+                    let bytecode = self.bytecode_slice();
+                    let text_bytes = text.as_bytes();
+                    let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+                    return scratch.find_at(&vm, wide_nfa, start)
+                        .map(|(s, e)| Match { start: s, end: e });
                 }
-                // Wide NFA found no match. In Unicode mode, the byte-level NFA
-                // may miss Unicode-specific matches. Fall back to exec.
-                if self.flags.contains(Flags::UNICODE) {
-                    return match vm.exec_with_scratch(scratch, start) {
-                        pikevm::PikeResult::Match(caps) => {
-                            let s = caps.get(0).copied().flatten()?;
-                            let e = caps.get(1).copied().flatten()?;
-                            Some(Match { start: s, end: e })
-                        }
-                        pikevm::PikeResult::NoMatch => None,
-                    };
-                }
-                return None;
             }
             // Fallback: exec with scratch (reuse buffers, no fresh allocation)
             let bytecode = self.bytecode_slice();
