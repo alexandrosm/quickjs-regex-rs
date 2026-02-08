@@ -151,7 +151,6 @@ fn model_count_spans(
         }
     }
 }
-}
 
 fn model_count_captures(
     b: &klv::Benchmark,
