@@ -117,39 +117,30 @@ fn model_count_spans(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
-    match mode {
-        Mode::PureRust => {
-            // Use count_spans (find_iter with persistent PikeScanner).
-            // For non-Unicode ASCII patterns: PikeScanner DFA gives correct counts.
-            // For Unicode patterns on non-ASCII text: exec_with_scratch fallback.
-            timer::run(b, || Ok(re.count_spans(haystack)))
-        }
-        _ => {
-            timer::run(b, || {
-                let mut sum = 0;
-                let mut pos = 0;
-                while pos < haystack.len() {
-                    let m = match mode {
-                        Mode::Hybrid => re.find(&haystack[pos..]),
-                        Mode::CEngine => re.find_at_c_engine(haystack, pos),
-                        _ => unreachable!(),
+    let mut scratch = re.create_scratch();
+    timer::run(b, || {
+        let mut sum = 0;
+        let mut pos = 0;
+        while pos < haystack.len() {
+            let m = match mode {
+                Mode::Hybrid => re.find(&haystack[pos..]),
+                Mode::PureRust => re.find_at_scratch(haystack, pos, &mut scratch),
+                Mode::CEngine => re.find_at_c_engine(haystack, pos),
+            };
+            match m {
+                Some(m) => {
+                    let (start, end) = match mode {
+                        Mode::Hybrid => (pos + m.start, pos + m.end),
+                        _ => (m.start, m.end),
                     };
-                    match m {
-                        Some(m) => {
-                            let (start, end) = match mode {
-                                Mode::Hybrid => (pos + m.start, pos + m.end),
-                                _ => (m.start, m.end),
-                            };
-                            sum += end - start;
-                            pos = if end > start { end } else { start + 1 };
-                        }
-                        None => break,
-                    }
+                    sum += end - start;
+                    pos = if end > start { end } else { start + 1 };
                 }
-                Ok(sum)
-            })
+                None => break,
+            }
         }
-    }
+        Ok(sum)
+    })
 }
 
 fn model_count_captures(
