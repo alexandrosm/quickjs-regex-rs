@@ -842,7 +842,26 @@ impl Regex {
 
         // Use Pike VM for patterns without backreferences or lookaround (guaranteed linear time).
         // Pike VM already handles Unicode word chars via is_alphanumeric().
-        let use_pike = !info.has_backrefs && !info.has_lookahead;
+        // Check bytecode for actual lookahead/lookbehind opcodes (40, 41).
+        // The AST flag has_lookahead can be wrong (e.g., non-capturing groups
+        // with inline flags misidentified). Check the bytecode directly.
+        let has_lookahead_opcodes = {
+            let mut pc = 8; // RE_HEADER_LEN
+            let bc_body_len = u32::from_le_bytes([
+                bytecode_vec[4], bytecode_vec[5], bytecode_vec[6], bytecode_vec[7],
+            ]) as usize;
+            let bc_end = 8 + bc_body_len;
+            let mut found = false;
+            while pc < bc_end && pc < bytecode_vec.len() {
+                if bytecode_vec[pc] == 40 || bytecode_vec[pc] == 41 {
+                    found = true;
+                    break;
+                }
+                pc += bitvm::instruction_size(&bytecode_vec, pc);
+            }
+            found
+        };
+        let use_pike = !info.has_backrefs && !has_lookahead_opcodes;
 
         // Compile Wide NFA (dynamic-width bit-parallel program).
         // Used for fast first-pass match_end detection: O(states/64) per byte.
