@@ -1050,9 +1050,7 @@ impl Scratch {
     pub fn find_at(&mut self, vm: &PikeVm, wide_nfa: &super::bitvm::BitVmProgram, start_pos: usize) -> Option<(usize, usize)> {
         let match_end = wide_nfa.find_match_end(vm.input, start_pos)?;
 
-        // Add padding: the Wide NFA's match_end may be slightly short for some patterns
-        let padded_end = (match_end + 200).min(vm.input_len);
-        let bounded_vm = PikeVm::new(vm.bytecode, &vm.input[..padded_end]);
+        let bounded_vm = PikeVm::new(vm.bytecode, &vm.input[..match_end]);
         match bounded_vm.exec_reuse(
             &mut self.curr, &mut self.next,
             &mut self.eps_stack, &mut self.tmp_caps, &mut self.tmp_regs,
@@ -1161,12 +1159,8 @@ impl<'a> PikeScanner<'a> {
         // Pass 1: DFA scan for match_end (fast)
         let match_end = self.find_match_cached(start_pos)?;
 
-        // Pass 2: bounded exec on input[..match_end + padding].
-        // The DFA's match_end is an approximation — the actual match might extend
-        // a few bytes further (e.g. for date regex with multi-char tokens).
-        // Add padding to avoid cutting off the real match.
-        let padded_end = (match_end + 200).min(self.vm.input_len);
-        let bounded_vm = PikeVm::new(self.vm.bytecode, &self.vm.input[..padded_end]);
+        // Pass 2: bounded exec on input[..match_end].
+        let bounded_vm = PikeVm::new(self.vm.bytecode, &self.vm.input[..match_end]);
         match bounded_vm.exec_reuse(
             &mut self.exec_curr, &mut self.exec_next,
             &mut self.exec_eps_stack, &mut self.exec_tmp_caps, &mut self.exec_tmp_regs,
