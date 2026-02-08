@@ -1954,11 +1954,8 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
-                // Scanner/Verifier: Bit VM fast-forwards, Pike VM verifies
-                if let Some(ref prog) = self.bit_program {
-                    return self.count_matches_bit_scanner(text, prog);
-                }
-                // Pike VM with prefilter acceleration
+                // Pike VM with DFA-cached scanner for correct counts.
+                // The PikeScanner handles registers and assertions correctly.
                 if self.use_pike_vm {
                     return self.count_matches_pike(text);
                 }
