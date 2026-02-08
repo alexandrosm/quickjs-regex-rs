@@ -1247,11 +1247,14 @@ impl Regex {
             return self.find_at_linear(text, start);
         }
 
-        // Bit VM fast rejection: if no match exists in remaining input, return immediately.
-        // O(N/64) scan — much faster than Pike VM's O(N*states).
-        if let Some(ref prog) = self.bit_program {
-            if !prog.has_match(&text_bytes[start..]) {
-                return None;
+        // Skip the has_match pre-check for Pike VM patterns: exec_with_scratch
+        // handles "no match" correctly. The pre-check scans the ENTIRE remaining
+        // text per call — counterproductive for count-spans with 100K+ calls.
+        if !self.use_pike_vm {
+            if let Some(ref prog) = self.bit_program {
+                if !prog.has_match(&text_bytes[start..]) {
+                    return None;
+                }
             }
         }
 
