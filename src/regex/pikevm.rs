@@ -928,11 +928,39 @@ impl Scratch {
         }
     }
 
-    /// Exec-free find using Wide NFA only. Returns (start, end).
-    /// No Pike VM exec needed — the Wide NFA tracks both match_start and match_end.
-    /// Per-byte cost: O(non_initial_states × words) with precomputed initial contributions.
-    pub fn find_at(&mut self, _vm: &PikeVm, wide_nfa: &super::bitvm::BitVmProgram, start_pos: usize) -> Option<(usize, usize)> {
-        wide_nfa.find_match(_vm.input, start_pos)
+    /// Two-pass find: Wide NFA for fast match_end + bounded exec for correct semantics.
+    /// Pass 1: Wide NFA scans at O(states/64)/byte — finds where a match ends.
+    /// Pass 2: Bounded exec on input[..match_end] — correct greedy/lazy/assertion semantics.
+    pub fn find_at(&mut self, vm: &PikeVm, wide_nfa: &super::bitvm::BitVmProgram, start_pos: usize) -> Option<(usize, usize)> {
+        let match_end = wide_nfa.find_match_end(vm.input, start_pos)?;
+
+        let bounded_vm = PikeVm::new(vm.bytecode, &vm.input[..match_end]);
+        match bounded_vm.exec_reuse(
+            &mut self.curr, &mut self.next,
+            &mut self.eps_stack, &mut self.tmp_caps, &mut self.tmp_regs,
+            start_pos,
+        ) {
+            PikeResult::Match(caps) => {
+                let s = caps.get(0).copied().flatten()?;
+                let e = caps.get(1).copied().flatten()?;
+                Some((s, e))
+            }
+            PikeResult::NoMatch => {
+                // Wide NFA false positive — fall back to full exec
+                match vm.exec_reuse(
+                    &mut self.curr, &mut self.next,
+                    &mut self.eps_stack, &mut self.tmp_caps, &mut self.tmp_regs,
+                    start_pos,
+                ) {
+                    PikeResult::Match(caps) => {
+                        let s = caps.get(0).copied().flatten()?;
+                        let e = caps.get(1).copied().flatten()?;
+                        Some((s, e))
+                    }
+                    PikeResult::NoMatch => None,
+                }
+            }
+        }
     }
 }
 

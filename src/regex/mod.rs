@@ -1967,22 +1967,31 @@ impl Regex {
         }
     }
 
-    /// Scanner/Verifier: Bit VM scans for potential matches at O(N/64),
-    /// Pike VM verifies each candidate with correct greedy/lazy semantics.
-    /// Count matches using Wide NFA directly — no Pike VM exec needed.
-    /// Uses find_match which tracks (start, end) in the NFA itself.
+    /// Count matches: Wide NFA find_match_end (fast scan) + bounded exec (correct semantics).
+    /// Scratch allocated once, reused across all matches.
     fn count_matches_bit_scanner(&self, text: &str, prog: &bitvm::BitVmProgram) -> usize {
         let text_bytes = text.as_bytes();
+        let bytecode = self.bytecode_slice();
+        let mut scratch = self.create_scratch();
         let mut count = 0;
         let mut pos = 0;
 
         while pos <= text_bytes.len() {
-            match prog.find_match(text_bytes, pos) {
-                Some((start, end)) => {
+            let match_end = match prog.find_match_end(text_bytes, pos) {
+                Some(end) => end,
+                None => break,
+            };
+            let bounded_vm = pikevm::PikeVm::new(bytecode, &text_bytes[..match_end]);
+            match bounded_vm.exec_with_scratch(&mut scratch, pos) {
+                pikevm::PikeResult::Match(caps) => {
                     count += 1;
+                    let end = caps.get(1).copied().flatten().unwrap_or(pos + 1);
+                    let start = caps.get(0).copied().flatten().unwrap_or(pos);
                     pos = if end > start { end } else { start + 1 };
                 }
-                None => break,
+                pikevm::PikeResult::NoMatch => {
+                    pos = match_end; // Wide NFA false positive — skip past
+                }
             }
         }
 
