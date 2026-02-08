@@ -1224,10 +1224,16 @@ impl<'a> PikeScanner<'a> {
     /// For non-ASCII-heavy text or Unicode mode, uses exec_reuse directly
     /// (the DFA's per-non-ASCII-byte overhead makes it slower than raw exec).
     pub fn count_all(&mut self) -> usize {
-        // Check if text is mostly non-ASCII (first 256 bytes sample)
+        // Use exec_reuse directly (skip DFA) when:
+        // - Word boundary assertions: DFA can't cache (position-dependent)
+        // - Non-ASCII text with Unicode mode: DFA has per-byte HashMap overhead
+        let has_wb = match &self.dfa {
+            DfaStorage::Owned(dfa) => dfa.has_word_boundary,
+            DfaStorage::Borrowed(cell) => cell.borrow().has_word_boundary,
+        };
         let sample = &self.vm.input[..self.vm.input_len.min(256)];
         let non_ascii = sample.iter().filter(|&&b| b >= 128).count();
-        let use_exec = self.vm.unicode_mode || non_ascii > sample.len() / 2;
+        let use_exec = has_wb || (self.vm.unicode_mode && non_ascii > sample.len() / 4);
 
         let mut count = 0;
         let mut pos = 0;

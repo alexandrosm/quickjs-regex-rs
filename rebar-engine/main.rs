@@ -3,7 +3,7 @@ use std::io::Write;
 use {
     anyhow::Context,
     lexopt::{Arg, ValueExt},
-    quickjs_regex::{Flags, Regex, Scratch},
+    quickjs_regex::{Flags, Regex},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -117,38 +117,29 @@ fn model_count_spans(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
-    match mode {
-        Mode::PureRust => {
-            // Use count_spans: persistent PikeScanner with DFA (byte-class +
-            // assertion-aware caching) + bounded exec. No per-call overhead.
-            timer::run(b, || Ok(re.count_spans(haystack)))
-        }
-        _ => {
-            timer::run(b, || {
-                let mut sum = 0;
-                let mut pos = 0;
-                while pos < haystack.len() {
-                    let m = match mode {
-                        Mode::Hybrid => re.find(&haystack[pos..]),
-                        Mode::CEngine => re.find_at_c_engine(haystack, pos),
-                        _ => unreachable!(),
+    timer::run(b, || {
+        let mut sum = 0;
+        let mut pos = 0;
+        while pos < haystack.len() {
+            let m = match mode {
+                Mode::Hybrid => re.find(&haystack[pos..]),
+                Mode::PureRust => re.find_at(haystack, pos),
+                Mode::CEngine => re.find_at_c_engine(haystack, pos),
+            };
+            match m {
+                Some(m) => {
+                    let (start, end) = match mode {
+                        Mode::Hybrid => (pos + m.start, pos + m.end),
+                        _ => (m.start, m.end),
                     };
-                    match m {
-                        Some(m) => {
-                            let (start, end) = match mode {
-                                Mode::Hybrid => (pos + m.start, pos + m.end),
-                                _ => (m.start, m.end),
-                            };
-                            sum += end - start;
-                            pos = if end > start { end } else { start + 1 };
-                        }
-                        None => break,
-                    }
+                    sum += end - start;
+                    pos = if end > start { end } else { start + 1 };
                 }
-                Ok(sum)
-            })
+                None => break,
+            }
         }
-    }
+        Ok(sum)
+    })
 }
 
 fn model_count_captures(
@@ -157,14 +148,13 @@ fn model_count_captures(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
-    let mut scratch = re.create_scratch();
     timer::run(b, || {
         let mut count = 0;
         let mut pos = 0;
         while pos < haystack.len() {
             let caps = match mode {
                 Mode::Hybrid => re.captures(&haystack[pos..]),
-                Mode::PureRust => re.captures_at_scratch(haystack, pos, &mut scratch),
+                Mode::PureRust => re.captures_at_pure_rust(haystack, pos),
                 Mode::CEngine => re.captures_at(haystack, pos),
             };
             match caps {
@@ -198,13 +188,12 @@ fn model_grep(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
-    let mut scratch = re.create_scratch();
     timer::run(b, || {
         let mut count = 0;
         for line in haystack.lines() {
             let found = match mode {
                 Mode::Hybrid => re.find(line).is_some(),
-                Mode::PureRust => re.find_at_scratch(line, 0, &mut scratch).is_some(),
+                Mode::PureRust => re.find_at(line, 0).is_some(),
                 Mode::CEngine => re.find_at_c_engine(line, 0).is_some(),
             };
             if found {
@@ -221,7 +210,6 @@ fn model_grep_captures(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
-    let mut scratch = re.create_scratch();
     timer::run(b, || {
         let mut count = 0;
         for line in haystack.lines() {
@@ -229,7 +217,7 @@ fn model_grep_captures(
             while pos < line.len() {
                 let caps = match mode {
                     Mode::Hybrid => re.captures(&line[pos..]),
-                    Mode::PureRust => re.captures_at_scratch(line, pos, &mut scratch),
+                    Mode::PureRust => re.captures_at_pure_rust(line, pos),
                     Mode::CEngine => re.captures_at(line, pos),
                 };
                 match caps {
