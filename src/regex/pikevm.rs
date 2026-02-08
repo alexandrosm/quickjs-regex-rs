@@ -1446,8 +1446,19 @@ impl<'a> PikeScanner<'a> {
 
 #[inline] fn is_word_char_at(input: &[u8], pos: usize) -> bool {
     let b = input[pos];
-    if b < 0x80 { b.is_ascii_alphanumeric() || b == b'_' }
-    else { std::str::from_utf8(&input[pos..]).ok().and_then(|s| s.chars().next()).map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) }
+    if b < 0x80 { return b.is_ascii_alphanumeric() || b == b'_'; }
+    // Decode only the needed UTF-8 bytes (was O(N) per call, now O(1))
+    let len = match b {
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => return false,
+    };
+    if pos + len > input.len() { return false; }
+    std::str::from_utf8(&input[pos..pos + len]).ok()
+        .and_then(|s| s.chars().next())
+        .map(|c| c.is_alphanumeric() || c == '_')
+        .unwrap_or(false)
 }
 
 /// Detect if a Range16 bytecode is the \w character class pattern
