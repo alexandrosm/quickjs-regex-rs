@@ -1720,47 +1720,44 @@ impl Regex {
 
     fn find_at_linear(&self, text: &str, start: usize) -> Option<Match> {
         if self.use_pike_vm {
-            // Use Wide NFA (if available) for fast match_end + bounded exec.
-            // For non-ASCII text in Unicode mode, use exec directly.
+            // Use thread-local Scratch for exec buffer reuse across find_at calls.
+            // This is the key optimization: avoids per-call ThreadList allocation.
+            use std::cell::RefCell;
+            thread_local! {
+                static SCRATCH: RefCell<Option<pikevm::Scratch>> = RefCell::new(None);
+            }
             let text_bytes = text.as_bytes();
             let bytecode = self.bytecode_slice();
 
-            // Check if Wide NFA can handle this text
-            let sample = &text_bytes[..text_bytes.len().min(256)];
-            let non_ascii = sample.iter().filter(|&&b| b >= 128).count();
-            let text_is_ascii = non_ascii <= sample.len() / 4;
+            return SCRATCH.with(|cell| {
+                let mut scratch_opt = cell.borrow_mut();
+                // Create or resize scratch for this regex
+                let scratch = scratch_opt.get_or_insert_with(|| self.create_scratch());
 
-            if text_is_ascii {
-                if let Some(ref wide_nfa) = self.bit_program {
-                    let match_end = wide_nfa.find_match_end(text_bytes, start);
-                    if let Some(match_end) = match_end {
-                        // Bounded exec for correct match
-                        let vm = pikevm::PikeVm::new(bytecode, &text_bytes[..match_end]);
-                        return match vm.exec(start) {
-                            pikevm::PikeResult::Match(caps) => {
-                                let s = caps.get(0).copied().flatten()?;
-                                let e = caps.get(1).copied().flatten()?;
-                                Some(Match { start: s, end: e })
-                            }
-                            pikevm::PikeResult::NoMatch => {
-                                // Wide NFA false positive — try full exec
-                                let vm2 = pikevm::PikeVm::new(bytecode, text_bytes);
-                                match vm2.exec(start) {
-                                    pikevm::PikeResult::Match(caps) => {
-                                        let s = caps.get(0).copied().flatten()?;
-                                        let e = caps.get(1).copied().flatten()?;
-                                        Some(Match { start: s, end: e })
-                                    }
-                                    pikevm::PikeResult::NoMatch => None,
-                                }
-                            }
-                        };
+                // Check if Wide NFA can handle this text
+                let sample = &text_bytes[..text_bytes.len().min(256)];
+                let non_ascii = sample.iter().filter(|&&b| b >= 128).count();
+                let text_is_ascii = non_ascii <= sample.len() / 4;
+
+                if text_is_ascii {
+                    if let Some(ref wide_nfa) = self.bit_program {
+                        return scratch.find_at(
+                            &pikevm::PikeVm::new(bytecode, text_bytes),
+                            wide_nfa, start,
+                        ).map(|(s, e)| Match { start: s, end: e });
                     }
-                    return None; // Wide NFA says no match
                 }
-            }
-            // Fallback: plain exec
-            return self.try_match_at(text, start);
+                // Fallback: exec with scratch (reuses buffers)
+                let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+                match vm.exec_with_scratch(scratch, start) {
+                    pikevm::PikeResult::Match(caps) => {
+                        let s = caps.get(0).copied().flatten()?;
+                        let e = caps.get(1).copied().flatten()?;
+                        Some(Match { start: s, end: e })
+                    }
+                    pikevm::PikeResult::NoMatch => None,
+                }
+            });
         }
         let mut pos = start;
         while pos <= text.len() {
