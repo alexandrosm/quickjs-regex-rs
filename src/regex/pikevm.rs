@@ -472,8 +472,8 @@ impl<'a> PikeVm<'a> {
                     }
                 }
                 op::WORD_BOUNDARY | op::NOT_WORD_BOUNDARY => {
-                    let before = if at > 0 { is_word_char_at(self.input, at - 1) } else { false };
-                    let after = if at < self.input_len { is_word_char_at(self.input, at) } else { false };
+                    let before = if at > 0 { is_word_char_at(self.input, at - 1, self.unicode_mode) } else { false };
+                    let after = if at < self.input_len { is_word_char_at(self.input, at, self.unicode_mode) } else { false };
                     if (opcode == op::WORD_BOUNDARY) == (before != after) {
                         stack.push((pc + 1, false));
                     }
@@ -789,8 +789,8 @@ impl<'a> PikeVm<'a> {
                         }
 
                         op::WORD_BOUNDARY | op::NOT_WORD_BOUNDARY => {
-                            let before = if at > 0 { is_word_char_at(self.input, at - 1) } else { false };
-                            let after = if at < self.input_len { is_word_char_at(self.input, at) } else { false };
+                            let before = if at > 0 { is_word_char_at(self.input, at - 1, self.unicode_mode) } else { false };
+                            let after = if at < self.input_len { is_word_char_at(self.input, at, self.unicode_mode) } else { false };
                             let is_boundary = before != after;
                             if (opcode == op::WORD_BOUNDARY) == is_boundary {
                                 stack.push(EpsFrame::Explore(pc + 1));
@@ -1444,15 +1444,17 @@ impl<'a> PikeScanner<'a> {
     matches!(c, 0x09 | 0x0A | 0x0B | 0x0C | 0x0D | 0x20 | 0xA0 | 0x1680 | 0x2000..=0x200A | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF)
 }
 
-#[inline] fn is_word_char_at(input: &[u8], pos: usize) -> bool {
+#[inline] fn is_word_char_at(input: &[u8], pos: usize, unicode: bool) -> bool {
     let b = input[pos];
     if b < 0x80 { return b.is_ascii_alphanumeric() || b == b'_'; }
-    // Find the start of the UTF-8 char containing this byte.
+    // Non-ASCII: in non-Unicode mode, non-ASCII bytes are never word chars.
+    if !unicode { return false; }
+    // Unicode mode: find the start of the UTF-8 char containing this byte.
     // pos might be at a continuation byte (0x80..0xBF) — scan back for lead byte.
     let mut start = pos;
     while start > 0 && (input[start] & 0xC0) == 0x80 {
         start -= 1;
-        if pos - start >= 4 { return false; } // max 4-byte UTF-8
+        if pos - start >= 4 { return false; }
     }
     let lead = input[start];
     let len = match lead {
