@@ -179,7 +179,7 @@ const MAX_DFA_STATES: usize = 16384;
 /// Compute byte equivalence classes from bytecode.
 /// Bytes in the same class have identical behavior for all consuming states.
 /// Returns (class_map, num_classes).
-fn compute_byte_classes(bytecode: &[u8]) -> ([u8; 256], usize) {
+fn compute_byte_classes(bytecode: &[u8]) -> ([u8; 256], usize, bool) {
     use std::collections::BTreeSet;
 
     let bc_len = u32::from_le_bytes([
@@ -191,10 +191,14 @@ fn compute_byte_classes(bytecode: &[u8]) -> ([u8; 256], usize) {
     let mut boundaries = BTreeSet::new();
     boundaries.insert(0u16);
     boundaries.insert(128); // ASCII vs non-ASCII boundary
+    let mut has_word_boundary = false;
 
     let mut pc = RE_HEADER_LEN;
     while pc < total_pcs && pc < bytecode.len() {
         let opc = bytecode[pc];
+        if opc == op::WORD_BOUNDARY || opc == op::NOT_WORD_BOUNDARY {
+            has_word_boundary = true;
+        }
         match opc {
             op::CHAR | op::CHAR_I => {
                 if pc + 2 < bytecode.len() {
@@ -260,16 +264,20 @@ fn compute_byte_classes(bytecode: &[u8]) -> ([u8; 256], usize) {
         }
     }
 
-    (class_map, num_classes as usize)
+    (class_map, num_classes as usize, has_word_boundary)
 }
 
 pub struct LazyDfa {
-    /// State set → state ID mapping
-    state_map: std::collections::HashMap<Vec<u32>, u32>,
+    /// State set + prev_is_word → state ID mapping.
+    /// Word boundary assertions depend on whether the previous byte was a word char.
+    /// Including this in the key ensures correct DFA transitions at word boundaries.
+    state_map: std::collections::HashMap<(Vec<u32>, bool), u32>,
     /// Transition table: state_id × class → next state_id (None = not yet computed)
     transitions: Vec<Vec<Option<u32>>>,
     /// State sets by ID (for epsilon closure on cache miss)
     state_sets: Vec<Vec<u32>>,
+    /// prev_is_word flag per state
+    state_prev_word: Vec<bool>,
     /// Which states contain MATCH
     has_match: Vec<bool>,
     next_id: u32,
@@ -277,6 +285,8 @@ pub struct LazyDfa {
     class_map: [u8; 256],
     /// Number of equivalence classes
     num_classes: usize,
+    /// Whether the bytecode has word boundary assertions (position-dependent → no caching)
+    has_word_boundary: bool,
 }
 
 impl LazyDfa {
@@ -288,30 +298,35 @@ impl LazyDfa {
             state_map: std::collections::HashMap::new(),
             transitions: Vec::new(),
             state_sets: Vec::new(),
+            state_prev_word: Vec::new(),
             has_match: Vec::new(),
             next_id: 0,
             class_map,
             num_classes: 256,
+            has_word_boundary: false,
         }
     }
 
     /// Create a DFA with byte-class equivalence derived from bytecode.
     pub fn with_classes(bytecode: &[u8]) -> Self {
-        let (class_map, num_classes) = compute_byte_classes(bytecode);
+        let (class_map, num_classes, has_word_boundary) = compute_byte_classes(bytecode);
         LazyDfa {
             state_map: std::collections::HashMap::new(),
             transitions: Vec::new(),
             state_sets: Vec::new(),
+            state_prev_word: Vec::new(),
             has_match: Vec::new(),
             next_id: 0,
             class_map,
             num_classes,
+            has_word_boundary,
         }
     }
 
-    /// Get or create a state ID for a given state set
-    fn get_or_create_state(&mut self, states: &[u32], contains_match: bool) -> Option<u32> {
-        if let Some(&id) = self.state_map.get(states) {
+    /// Get or create a state ID for a given (state set, prev_is_word) pair
+    fn get_or_create_state(&mut self, states: &[u32], contains_match: bool, prev_is_word: bool) -> Option<u32> {
+        let key = (states.to_vec(), prev_is_word);
+        if let Some(&id) = self.state_map.get(&key) {
             return Some(id);
         }
         if self.next_id as usize >= MAX_DFA_STATES {
@@ -319,8 +334,9 @@ impl LazyDfa {
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.state_map.insert(states.to_vec(), id);
+        self.state_map.insert(key, id);
         self.state_sets.push(states.to_vec());
+        self.state_prev_word.push(prev_is_word);
         self.transitions.push(vec![None; self.num_classes]);
         self.has_match.push(contains_match);
         Some(id)
@@ -334,8 +350,10 @@ impl LazyDfa {
             .and_then(|t| t.get(class).copied().flatten())
     }
 
-    /// Store a transition via byte class
-    fn store(&mut self, state_id: u32, byte: u8, next_state_id: u32) {
+    /// Store a transition via byte class.
+    /// When has_assertions is true, DON'T cache (assertions are position-dependent).
+    fn store(&mut self, state_id: u32, byte: u8, next_state_id: u32, has_assertions: bool) {
+        if has_assertions { return; } // Position-dependent: can't cache
         let class = self.class_map[byte as usize] as usize;
         if let Some(t) = self.transitions.get_mut(state_id as usize) {
             if class < t.len() {
@@ -1296,7 +1314,13 @@ impl<'a> PikeScanner<'a> {
             .any(|&pc| (pc as usize) < vm.bytecode.len() && vm.bytecode[pc as usize] == op::MATCH);
 
         // Register initial state in DFA
-        let mut current_dfa_state = match dfa.get_or_create_state(curr_states, init_has_match) {
+        // Track prev_is_word for DFA state (word boundary depends on previous char)
+        let init_prev_word = if start_pos > 0 {
+            let b = vm.input[start_pos - 1];
+            b < 0x80 && (b.is_ascii_alphanumeric() || b == b'_')
+        } else { false };
+        let mut prev_is_word = init_prev_word;
+        let mut current_dfa_state = match dfa.get_or_create_state(curr_states, init_has_match, prev_is_word) {
             Some(id) => id,
             None => {
                 // DFA cache full — fall back to uncached Pike VM
@@ -1307,6 +1331,9 @@ impl<'a> PikeScanner<'a> {
         let mut at = start_pos;
         let mut best_end: Option<usize> = None;
         let initial_dfa_state = current_dfa_state;
+
+        #[cfg(debug_assertions)]
+        eprintln!("[DFA] start: pos={} initial_states={} dfa_states={} num_classes={}", start_pos, curr_states.len(), dfa.next_id, dfa.num_classes);
 
         loop {
             // Check for match
@@ -1321,7 +1348,10 @@ impl<'a> PikeScanner<'a> {
                         return best_end; // Highest priority match → immediate win
                     }
                 }
-            } else if best_end.is_some() && current_dfa_state == initial_dfa_state {
+            } else if best_end.is_some() {
+                // MATCH was present but is now gone — the match has ended.
+                #[cfg(debug_assertions)]
+                eprintln!("[DFA] match ended at={} best_end={:?} state={}", at, best_end, current_dfa_state);
                 // Match ended and we've returned to the initial prefix-loop state.
                 // The match is complete — return it. This prevents the DFA from
                 // extending through the prefix loop to merge separate matches.
@@ -1358,7 +1388,15 @@ impl<'a> PikeScanner<'a> {
                 let next_has_match = next_states.iter()
                     .any(|&pc| (pc as usize) < vm.bytecode.len() && vm.bytecode[pc as usize] == op::MATCH);
 
-                match dfa.get_or_create_state(next_states, next_has_match) {
+                // Update prev_is_word for the consumed char
+                let consumed_is_word = if c < 0x80 {
+                    (c as u8).is_ascii_alphanumeric() || c as u8 == b'_'
+                } else {
+                    char::from_u32(c).map(|ch| ch.is_alphanumeric() || ch == '_').unwrap_or(false)
+                };
+                prev_is_word = consumed_is_word;
+
+                match dfa.get_or_create_state(next_states, next_has_match, prev_is_word) {
                     Some(next_id) => {
                         current_dfa_state = next_id;
                     }
@@ -1372,7 +1410,14 @@ impl<'a> PikeScanner<'a> {
             }
 
             // O(1) DFA transition lookup (ASCII bytes use byte-class cache)
-            if let Some(next_id) = dfa.lookup(current_dfa_state, b) {
+            let lookup_result = dfa.lookup(current_dfa_state, b);
+            #[cfg(debug_assertions)]
+            if at < 5 {
+                let class = dfa.class_map[b as usize] as usize;
+                eprintln!("[DFA] at={} byte={:02x} class={} lookup={:?} state={}", at, b, class, lookup_result, current_dfa_state);
+            }
+            if let Some(next_id) = lookup_result {
+                prev_is_word = b.is_ascii_alphanumeric() || b == b'_';
                 current_dfa_state = next_id;
                 at += 1;
                 continue;
@@ -1403,9 +1448,12 @@ impl<'a> PikeScanner<'a> {
             let next_has_match = next_states.iter()
                 .any(|&pc| (pc as usize) < vm.bytecode.len() && vm.bytecode[pc as usize] == op::MATCH);
 
-            match dfa.get_or_create_state(next_states, next_has_match) {
+            // Update prev_is_word for the consumed ASCII byte
+            prev_is_word = b.is_ascii_alphanumeric() || b == b'_';
+
+            match dfa.get_or_create_state(next_states, next_has_match, prev_is_word) {
                 Some(next_id) => {
-                    dfa.store(current_dfa_state, b, next_id);
+                    dfa.store(current_dfa_state, b, next_id, dfa.has_word_boundary);
                     current_dfa_state = next_id;
                 }
                 None => {
