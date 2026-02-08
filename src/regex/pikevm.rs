@@ -1447,15 +1447,22 @@ impl<'a> PikeScanner<'a> {
 #[inline] fn is_word_char_at(input: &[u8], pos: usize) -> bool {
     let b = input[pos];
     if b < 0x80 { return b.is_ascii_alphanumeric() || b == b'_'; }
-    // Decode only the needed UTF-8 bytes (was O(N) per call, now O(1))
-    let len = match b {
+    // Find the start of the UTF-8 char containing this byte.
+    // pos might be at a continuation byte (0x80..0xBF) — scan back for lead byte.
+    let mut start = pos;
+    while start > 0 && (input[start] & 0xC0) == 0x80 {
+        start -= 1;
+        if pos - start >= 4 { return false; } // max 4-byte UTF-8
+    }
+    let lead = input[start];
+    let len = match lead {
         0xC0..=0xDF => 2,
         0xE0..=0xEF => 3,
         0xF0..=0xF7 => 4,
         _ => return false,
     };
-    if pos + len > input.len() { return false; }
-    std::str::from_utf8(&input[pos..pos + len]).ok()
+    if start + len > input.len() { return false; }
+    std::str::from_utf8(&input[start..start + len]).ok()
         .and_then(|s| s.chars().next())
         .map(|c| c.is_alphanumeric() || c == '_')
         .unwrap_or(false)
