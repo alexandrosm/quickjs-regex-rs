@@ -602,7 +602,20 @@ impl<'a> PikeVm<'a> {
                     None => { candidate = Some(caps); }
                     Some(prev) => {
                         if caps.get(0) == prev.get(0) {
+                            // Same start position: update with latest (longest) match
                             candidate = Some(caps);
+                        }
+                        // Note: we can't return early when start differs because
+                        // greedy * can extend the match past the candidate's end.
+                    }
+                }
+                // Early termination: if candidate is non-empty and its end is
+                // past, the match can't be extended further. Return it.
+                // Skip for empty matches (greedy * can extend past empty).
+                if let Some(ref cand) = candidate {
+                    if let (Some(&Some(cand_start)), Some(&Some(cand_end))) = (cand.get(0), cand.get(1)) {
+                        if cand_end > cand_start && at > cand_end {
+                            return PikeResult::Match(candidate.unwrap());
                         }
                     }
                 }
