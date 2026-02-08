@@ -739,7 +739,7 @@ impl BitVmProgram {
 }
 
 /// Get the size of an instruction at the given PC
-fn instruction_size(bytecode: &[u8], pc: usize) -> usize {
+pub fn instruction_size(bytecode: &[u8], pc: usize) -> usize {
     if pc >= bytecode.len() { return 1; }
     match bytecode[pc] {
         1 | 2 => 3,       // Char, CharI

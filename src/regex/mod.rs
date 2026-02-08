@@ -1897,7 +1897,7 @@ impl Regex {
             bytecode[4], bytecode[5], bytecode[6], bytecode[7]
         ]) as usize;
         let num_pcs = 8 + body_len + 1;
-        pikevm::Scratch::new(num_pcs, capture_count, register_count)
+        pikevm::Scratch::new(num_pcs, capture_count, register_count, bytecode)
     }
 
     /// Find the first match starting at or after `start`, using pre-allocated

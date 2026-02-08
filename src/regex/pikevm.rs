@@ -169,31 +169,143 @@ enum EpsFrame {
 // Pike VM
 // ============================================================================
 
-/// Lazy DFA: assigns integer IDs to state sets and caches transitions.
-/// Each byte lookup is O(1) on cache hits: `transitions[state_id][byte]`.
-/// On cache misses, computes the transition via Pike VM and stores it.
-const MAX_DFA_STATES: usize = 8192;
+/// Lazy DFA with byte-class equivalence.
+/// Instead of 256 transitions per state, groups bytes into equivalence classes.
+/// Bytes that always trigger identical NFA transitions share a class.
+/// This reduces the transition table from 256 entries to ~20-50 entries per state,
+/// which means the DFA can cache 5-12× more states before overflow.
+const MAX_DFA_STATES: usize = 16384;
+
+/// Compute byte equivalence classes from bytecode.
+/// Bytes in the same class have identical behavior for all consuming states.
+/// Returns (class_map, num_classes).
+fn compute_byte_classes(bytecode: &[u8]) -> ([u8; 256], usize) {
+    use std::collections::BTreeSet;
+
+    let bc_len = u32::from_le_bytes([
+        bytecode[4], bytecode[5], bytecode[6], bytecode[7],
+    ]) as usize;
+    let total_pcs = RE_HEADER_LEN + bc_len;
+
+    // Collect all boundary points where byte behavior changes
+    let mut boundaries = BTreeSet::new();
+    boundaries.insert(0u16);
+    boundaries.insert(128); // ASCII vs non-ASCII boundary
+
+    let mut pc = RE_HEADER_LEN;
+    while pc < total_pcs && pc < bytecode.len() {
+        let opc = bytecode[pc];
+        match opc {
+            op::CHAR | op::CHAR_I => {
+                if pc + 2 < bytecode.len() {
+                    let val = u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]);
+                    if val < 256 {
+                        boundaries.insert(val);
+                        if val < 255 { boundaries.insert(val + 1); }
+                    }
+                    if opc == op::CHAR_I && val < 128 {
+                        // Case fold boundaries
+                        let lo = if val >= 65 && val <= 90 { val + 32 }
+                                 else if val >= 97 && val <= 122 { val - 32 }
+                                 else { val };
+                        if lo < 256 { boundaries.insert(lo); if lo < 255 { boundaries.insert(lo + 1); } }
+                    }
+                }
+            }
+            op::DOT => {
+                boundaries.insert(0x0A); boundaries.insert(0x0B);
+                boundaries.insert(0x0D); boundaries.insert(0x0E);
+            }
+            op::SPACE | op::NOT_SPACE => {
+                for &b in &[0x09u16, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x20, 0x21] {
+                    boundaries.insert(b);
+                }
+            }
+            op::RANGE | op::RANGE_I => {
+                if pc + 2 < bytecode.len() {
+                    let n = u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize;
+                    for i in 0..n {
+                        let base = pc + 3 + i * 4;
+                        if base + 3 < bytecode.len() {
+                            let lo = u16::from_le_bytes([bytecode[base], bytecode[base + 1]]);
+                            let hi = u16::from_le_bytes([bytecode[base + 2], bytecode[base + 3]]);
+                            if lo < 256 { boundaries.insert(lo); }
+                            if hi < 255 { boundaries.insert(hi + 1); }
+                        }
+                    }
+                    if opc == op::RANGE_I {
+                        // Case-insensitive: add ASCII case boundaries
+                        for &b in &[65u16, 91, 97, 123] { boundaries.insert(b); }
+                    }
+                }
+            }
+            _ => {}
+        }
+        pc += super::bitvm::instruction_size(bytecode, pc);
+    }
+
+    // Build class_map from sorted boundaries
+    let boundary_vec: Vec<u16> = boundaries.into_iter().filter(|&b| b <= 256).collect();
+    let mut class_map = [0u8; 256];
+    let mut num_classes = 0u8;
+
+    for i in 0..boundary_vec.len() {
+        let start = boundary_vec[i] as usize;
+        let end = if i + 1 < boundary_vec.len() { boundary_vec[i + 1] as usize } else { 256 };
+        for b in start..end.min(256) {
+            class_map[b] = num_classes;
+        }
+        if start < 256 {
+            num_classes = num_classes.saturating_add(1);
+        }
+    }
+
+    (class_map, num_classes as usize)
+}
 
 pub struct LazyDfa {
     /// State set → state ID mapping
     state_map: std::collections::HashMap<Vec<u32>, u32>,
-    /// Transition table: state_id × byte → next state_id (None = not yet computed)
-    transitions: Vec<[Option<u32>; 256]>,
+    /// Transition table: state_id × class → next state_id (None = not yet computed)
+    transitions: Vec<Vec<Option<u32>>>,
     /// State sets by ID (for epsilon closure on cache miss)
     state_sets: Vec<Vec<u32>>,
     /// Which states contain MATCH
     has_match: Vec<bool>,
     next_id: u32,
+    /// Byte → equivalence class mapping
+    class_map: [u8; 256],
+    /// Number of equivalence classes
+    num_classes: usize,
 }
 
 impl LazyDfa {
     pub fn new() -> Self {
+        // Identity mapping: 256 classes (no compression). Used when no bytecode available.
+        let mut class_map = [0u8; 256];
+        for i in 0..256 { class_map[i] = i as u8; }
         LazyDfa {
             state_map: std::collections::HashMap::new(),
             transitions: Vec::new(),
             state_sets: Vec::new(),
             has_match: Vec::new(),
             next_id: 0,
+            class_map,
+            num_classes: 256,
+        }
+    }
+
+    /// Create a DFA with byte-class equivalence derived from bytecode.
+    pub fn with_classes(bytecode: &[u8]) -> Self {
+        let (class_map, num_classes) = compute_byte_classes(bytecode);
+        LazyDfa {
+            state_map: std::collections::HashMap::new(),
+            transitions: Vec::new(),
+            state_sets: Vec::new(),
+            has_match: Vec::new(),
+            next_id: 0,
+            class_map,
+            num_classes,
         }
     }
 
@@ -209,22 +321,26 @@ impl LazyDfa {
         self.next_id += 1;
         self.state_map.insert(states.to_vec(), id);
         self.state_sets.push(states.to_vec());
-        self.transitions.push([None; 256]);
+        self.transitions.push(vec![None; self.num_classes]);
         self.has_match.push(contains_match);
         Some(id)
     }
 
-    /// Look up a transition. Returns None if not cached yet.
+    /// Look up a transition via byte class. Returns None if not cached yet.
     #[inline]
     fn lookup(&self, state_id: u32, byte: u8) -> Option<u32> {
+        let class = self.class_map[byte as usize] as usize;
         self.transitions.get(state_id as usize)
-            .and_then(|t| t[byte as usize])
+            .and_then(|t| t.get(class).copied().flatten())
     }
 
-    /// Store a transition
+    /// Store a transition via byte class
     fn store(&mut self, state_id: u32, byte: u8, next_state_id: u32) {
+        let class = self.class_map[byte as usize] as usize;
         if let Some(t) = self.transitions.get_mut(state_id as usize) {
-            t[byte as usize] = Some(next_state_id);
+            if class < t.len() {
+                t[class] = Some(next_state_id);
+            }
         }
     }
 
@@ -913,7 +1029,7 @@ pub struct Scratch {
 }
 
 impl Scratch {
-    pub fn new(num_pcs: usize, capture_count: usize, register_count: usize) -> Self {
+    pub fn new(num_pcs: usize, capture_count: usize, register_count: usize, bytecode: &[u8]) -> Self {
         Scratch {
             curr: ThreadList::new(num_pcs, capture_count, register_count),
             next: ThreadList::new(num_pcs, capture_count, register_count),
@@ -924,7 +1040,7 @@ impl Scratch {
             dfa_next_states: Vec::with_capacity(128),
             dfa_seen: vec![false; num_pcs],
             dfa_eps_stack: Vec::with_capacity(64),
-            dfa: RefCell::new(LazyDfa::new()),
+            dfa: RefCell::new(LazyDfa::with_classes(bytecode)),
         }
     }
 
@@ -1002,7 +1118,7 @@ impl<'a> PikeScanner<'a> {
             exec_tmp_caps: vec![None; cc * 2],
             exec_tmp_regs: vec![0; rc],
             vm,
-            dfa: DfaStorage::Owned(LazyDfa::new()),
+            dfa: DfaStorage::Owned(LazyDfa::with_classes(bytecode)),
             curr_states: Vec::with_capacity(128),
             next_states: Vec::with_capacity(128),
             seen: vec![false; num_pcs],
