@@ -1399,15 +1399,24 @@ impl Regex {
         let bytecode = self.bytecode_slice();
 
         if self.use_pike_vm {
-            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-            match vm.exec(pos) {
-                pikevm::PikeResult::Match(caps) => {
-                    let start = caps.get(0).copied().flatten()?;
-                    let end = caps.get(1).copied().flatten()?;
-                    Some(Match { start, end })
-                }
-                pikevm::PikeResult::NoMatch => None,
+            // Use thread-local Scratch for exec buffer reuse across calls.
+            use std::cell::RefCell;
+            thread_local! {
+                static EXEC_SCRATCH: RefCell<Option<pikevm::Scratch>> = RefCell::new(None);
             }
+            return EXEC_SCRATCH.with(|cell| {
+                let mut scratch_opt = cell.borrow_mut();
+                let scratch = scratch_opt.get_or_insert_with(|| self.create_scratch());
+                let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+                match vm.exec_with_scratch(scratch, pos) {
+                    pikevm::PikeResult::Match(caps) => {
+                        let start = caps.get(0).copied().flatten()?;
+                        let end = caps.get(1).copied().flatten()?;
+                        Some(Match { start, end })
+                    }
+                    pikevm::PikeResult::NoMatch => None,
+                }
+            });
         } else {
             let mut ctx = interpreter::ExecContext::new(bytecode, text_bytes);
             match ctx.exec(pos) {
