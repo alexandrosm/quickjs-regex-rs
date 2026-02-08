@@ -2267,12 +2267,10 @@ impl Regex {
         let text_bytes = text.as_bytes();
         let capture_count = self.capture_count();
 
-        // Skip has_match pre-check for Pike VM (counterproductive for repeated calls)
-        if !self.use_pike_vm {
-            if let Some(ref prog) = self.bit_program {
-                if !prog.has_match(&text_bytes[start..]) {
-                    return None;
-                }
+        // Bit VM fast rejection
+        if let Some(ref prog) = self.bit_program {
+            if !prog.has_match(&text_bytes[start..]) {
+                return None;
             }
         }
 
