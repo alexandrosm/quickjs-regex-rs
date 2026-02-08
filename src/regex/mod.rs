@@ -1977,38 +1977,52 @@ impl Regex {
         }
     }
 
-    /// Count matches: Wide NFA find_match_end (fast scan) + bounded exec (correct semantics).
-    /// Scratch allocated once, reused across all matches.
+    /// Count matches using Wide NFA. Two modes:
+    /// - Simple patterns (no registers): exec-free find_match (fast, correct for greedy)
+    /// - Complex patterns (registers/assertions): find_match_end + bounded exec
     fn count_matches_bit_scanner(&self, text: &str, prog: &bitvm::BitVmProgram) -> usize {
         let text_bytes = text.as_bytes();
         let bytecode = self.bytecode_slice();
+        let reg_count = bytecode[3] as usize;
+
+        // Fast path: exec-free Wide NFA for register-free patterns
+        if reg_count == 0 {
+            let mut count = 0;
+            let mut pos = 0;
+            while pos <= text_bytes.len() {
+                match prog.find_match(text_bytes, pos) {
+                    Some((start, end)) => {
+                        count += 1;
+                        pos = if end > start { end } else { start + 1 };
+                    }
+                    None => break,
+                }
+            }
+            return count;
+        }
+
+        // Slow path: find_match_end + bounded exec for register patterns
         let mut scratch = self.create_scratch();
         let mut count = 0;
         let mut pos = 0;
-
         while pos <= text_bytes.len() {
             let match_end = match prog.find_match_end(text_bytes, pos) {
                 Some(end) => end,
                 None => break,
             };
-            // #[cfg(debug_assertions)]
-            // eprintln!("[count_bit] pos={} match_end={}", pos, match_end);
             let bounded_vm = pikevm::PikeVm::new(bytecode, &text_bytes[..match_end]);
             match bounded_vm.exec_with_scratch(&mut scratch, pos) {
                 pikevm::PikeResult::Match(caps) => {
                     count += 1;
                     let end = caps.get(1).copied().flatten().unwrap_or(pos + 1);
                     let start = caps.get(0).copied().flatten().unwrap_or(pos);
-                    #[cfg(test)]
-                    eprintln!("[count_bit] match ({}, {}) count={}", start, end, count);
                     pos = if end > start { end } else { start + 1 };
                 }
                 pikevm::PikeResult::NoMatch => {
-                    pos = match_end; // Wide NFA false positive — skip past
+                    pos = match_end;
                 }
             }
         }
-
         count
     }
 
