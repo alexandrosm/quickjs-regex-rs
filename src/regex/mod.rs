@@ -2267,10 +2267,12 @@ impl Regex {
         let text_bytes = text.as_bytes();
         let capture_count = self.capture_count();
 
-        // Bit VM fast rejection
-        if let Some(ref prog) = self.bit_program {
-            if !prog.has_match(&text_bytes[start..]) {
-                return None;
+        // Skip has_match pre-check for Pike VM (counterproductive for repeated calls)
+        if !self.use_pike_vm {
+            if let Some(ref prog) = self.bit_program {
+                if !prog.has_match(&text_bytes[start..]) {
+                    return None;
+                }
             }
         }
 
@@ -2278,10 +2280,17 @@ impl Regex {
             std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
         };
 
-        // Use Pike VM for captures when available (linear time, correct semantics)
+        // Use Pike VM with thread-local Scratch (zero alloc per call)
         if self.use_pike_vm {
-            let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-            return match vm.exec(start) {
+            use std::cell::RefCell;
+            thread_local! {
+                static CAP_SCRATCH: RefCell<Option<pikevm::Scratch>> = RefCell::new(None);
+            }
+            return CAP_SCRATCH.with(|cell| {
+                let mut scratch_opt = cell.borrow_mut();
+                let scratch = scratch_opt.get_or_insert_with(|| self.create_scratch());
+                let vm = pikevm::PikeVm::new(bytecode, text_bytes);
+                match vm.exec_with_scratch(scratch, start) {
                 pikevm::PikeResult::Match(caps) => {
                     let mut groups = Vec::with_capacity(capture_count);
                     for i in 0..capture_count {
@@ -2298,7 +2307,8 @@ impl Regex {
                     })
                 }
                 pikevm::PikeResult::NoMatch => None,
-            };
+                }
+            });
         }
 
         // Fallback: backtracking interpreter (for patterns with backreferences)
