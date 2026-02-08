@@ -605,18 +605,25 @@ impl<'a> PikeVm<'a> {
                             // Same start position: update with latest (longest) match
                             candidate = Some(caps);
                         }
-                        // Note: we can't return early when start differs because
-                        // greedy * can extend the match past the candidate's end.
                     }
                 }
-                // Early termination: if candidate is non-empty and its end is
-                // past, the match can't be extended further. Return it.
-                // Skip for empty matches (greedy * can extend past empty).
-                if let Some(ref cand) = candidate {
-                    if let (Some(&Some(cand_start)), Some(&Some(cand_end))) = (cand.get(0), cand.get(1)) {
-                        if cand_end > cand_start && at > cand_end {
-                            return PikeResult::Match(candidate.unwrap());
+            } else if let Some(ref cand) = candidate {
+                // MATCH disappeared. Check if any alive thread could still
+                // produce a match from the same or earlier start position.
+                // If not: the candidate is the leftmost match — return it.
+                if let Some(&Some(cand_start)) = cand.get(0) {
+                    let mut has_earlier_thread = false;
+                    for &(_, slot_idx) in &curr.threads {
+                        let thread_caps = curr.get_caps(slot_idx);
+                        if let Some(&Some(s)) = thread_caps.get(0) {
+                            if s <= cand_start {
+                                has_earlier_thread = true;
+                                break;
+                            }
                         }
+                    }
+                    if !has_earlier_thread {
+                        return PikeResult::Match(candidate.unwrap());
                     }
                 }
             }
