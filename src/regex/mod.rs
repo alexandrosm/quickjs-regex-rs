@@ -2053,7 +2053,7 @@ impl Regex {
                     // For large patterns (>1000 NFA states): use Wide NFA to avoid
                     // DFA state overflow. E.g., noseyparker with 96 alternatives.
                     if let Some(ref prog) = self.bit_program {
-                        if prog.num_states > 1000 {
+                        if prog.num_states > 100 {
                             return self.count_matches_bit_scanner(text, prog);
                         }
                     }
