@@ -1954,8 +1954,11 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
-                // Pike VM with DFA-cached scanner for correct counts.
-                // The PikeScanner handles registers and assertions correctly.
+                // Wide NFA + bounded exec: fast scan, correct semantics
+                if let Some(ref prog) = self.bit_program {
+                    return self.count_matches_bit_scanner(text, prog);
+                }
+                // Pike VM fallback (patterns without Wide NFA: lookahead, CHAR32, etc.)
                 if self.use_pike_vm {
                     return self.count_matches_pike(text);
                 }
@@ -1978,12 +1981,16 @@ impl Regex {
                 Some(end) => end,
                 None => break,
             };
+            // #[cfg(debug_assertions)]
+            // eprintln!("[count_bit] pos={} match_end={}", pos, match_end);
             let bounded_vm = pikevm::PikeVm::new(bytecode, &text_bytes[..match_end]);
             match bounded_vm.exec_with_scratch(&mut scratch, pos) {
                 pikevm::PikeResult::Match(caps) => {
                     count += 1;
                     let end = caps.get(1).copied().flatten().unwrap_or(pos + 1);
                     let start = caps.get(0).copied().flatten().unwrap_or(pos);
+                    #[cfg(test)]
+                    eprintln!("[count_bit] match ({}, {}) count={}", start, end, count);
                     pos = if end > start { end } else { start + 1 };
                 }
                 pikevm::PikeResult::NoMatch => {

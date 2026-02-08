@@ -187,6 +187,29 @@ impl BitVmProgram {
         let mut pc = RE_HEADER_LEN;
         while pc < total_pcs {
             let opcode = bytecode[pc];
+
+            // Bail on CHAR32/RANGE32 with values > 255: can't handle multi-byte
+            // Unicode characters in the byte-level NFA. Fall back to Pike VM.
+            if opcode == op::CHAR32 {
+                let val = u32::from_le_bytes([
+                    bytecode[pc + 1], bytecode[pc + 2], bytecode[pc + 3], bytecode[pc + 4],
+                ]);
+                if val > 255 { return None; }
+            }
+            if opcode == op::RANGE32 {
+                let pair_count = u16::from_le_bytes([
+                    bytecode[pc + 1], bytecode[pc + 2],
+                ]) as usize;
+                for i in 0..pair_count {
+                    let base = pc + 3 + i * 8;
+                    let hi = u32::from_le_bytes([
+                        bytecode[base + 4], bytecode[base + 5],
+                        bytecode[base + 6], bytecode[base + 7],
+                    ]);
+                    if hi > 255 { return None; }
+                }
+            }
+
             let is_consuming = matches!(opcode,
                 op::CHAR | op::CHAR_I | op::CHAR32 | op::DOT | op::ANY |
                 op::SPACE | op::NOT_SPACE | op::RANGE | op::RANGE_I |
@@ -572,12 +595,16 @@ impl BitVmProgram {
                 next.clear();
             }
 
-            // Process non-initial active states (mid-match threads).
+            // Process active states. In Phase 1, skip initial states (handled by
+            // initial_contribution). In Phase 2, process ALL states (non_initial_mask
+            // would incorrectly filter out loop-back states that are also in initial).
             let mut dense_seen: u64 = 0;
             for word_idx in 0..w {
-                let mut bits = curr.words[word_idx]
-                    & self.non_initial_mask.words[word_idx]
-                    & byte_mask.words[word_idx];
+                let mut bits = if !found_match {
+                    curr.words[word_idx] & self.non_initial_mask.words[word_idx] & byte_mask.words[word_idx]
+                } else {
+                    curr.words[word_idx] & byte_mask.words[word_idx]
+                };
                 while bits != 0 {
                     let bit = bits.trailing_zeros() as usize;
                     bits &= bits - 1;

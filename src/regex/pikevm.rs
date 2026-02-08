@@ -1189,11 +1189,6 @@ impl<'a> PikeScanner<'a> {
                         return best_end; // Highest priority match → immediate win
                     }
                 }
-            } else if best_end.is_some() {
-                // Match was found on a previous step but is no longer active.
-                // The match has ended — return it. Don't extend through the
-                // prefix loop to a later match (which would be a different match).
-                return best_end;
             }
 
             if at >= vm.input_len { break; }
