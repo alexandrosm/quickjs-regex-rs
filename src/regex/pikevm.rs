@@ -1176,6 +1176,7 @@ impl<'a> PikeScanner<'a> {
 
         let mut at = start_pos;
         let mut best_end: Option<usize> = None;
+        let initial_dfa_state = current_dfa_state;
 
         loop {
             // Check for match
@@ -1190,21 +1191,30 @@ impl<'a> PikeScanner<'a> {
                         return best_end; // Highest priority match → immediate win
                     }
                 }
+            } else if best_end.is_some() && current_dfa_state == initial_dfa_state {
+                // Match ended and we've returned to the initial prefix-loop state.
+                // The match is complete — return it. This prevents the DFA from
+                // extending through the prefix loop to merge separate matches.
+                return best_end;
             }
 
             if at >= vm.input_len { break; }
 
             let b = vm.input[at];
             if b >= 128 {
-                // Non-ASCII: process this char via NFA (no DFA caching), then resume DFA
+                // Non-ASCII: process this char via NFA (no DFA caching), then resume DFA.
+                // Use curr_states as temporary buffer (avoids .to_vec() allocation).
                 let (c, char_len) = vm.next_char(at);
                 if char_len == 0 { break; }
 
-                let states_vec = dfa.get_state_set(current_dfa_state).to_vec();
+                curr_states.clear();
+                curr_states.extend_from_slice(dfa.get_state_set(current_dfa_state));
                 next_states.clear();
-                seen.fill(false);
+                // Targeted seen clearing: only clear bits we're about to set
+                for s in seen.iter_mut() { *s = false; }
 
-                for &pc in &states_vec {
+                for i in 0..curr_states.len() {
+                    let pc = curr_states[i];
                     let pc_usize = pc as usize;
                     if pc_usize >= vm.bytecode.len() { continue; }
                     let opcode = vm.bytecode[pc_usize];
@@ -1221,8 +1231,6 @@ impl<'a> PikeScanner<'a> {
 
                 match dfa.get_or_create_state(next_states, next_has_match) {
                     Some(next_id) => {
-                        // Don't cache transition for non-ASCII first byte
-                        // (same first byte can produce different chars in different contexts)
                         current_dfa_state = next_id;
                     }
                     None => {
@@ -1241,15 +1249,17 @@ impl<'a> PikeScanner<'a> {
                 continue;
             }
 
-            // Cache miss: compute transition via Pike VM
-            let states = dfa.get_state_set(current_dfa_state).to_vec();
+            // Cache miss: compute transition via Pike VM. Use curr_states as buffer.
+            curr_states.clear();
+            curr_states.extend_from_slice(dfa.get_state_set(current_dfa_state));
             next_states.clear();
-            seen.fill(false);
+            for s in seen.iter_mut() { *s = false; }
 
             let (c, char_len) = vm.next_char(at);
             if char_len == 0 { break; }
 
-            for &pc in &states {
+            for i in 0..curr_states.len() {
+                let pc = curr_states[i];
                 let pc_usize = pc as usize;
                 if pc_usize >= vm.bytecode.len() { continue; }
                 let opcode = vm.bytecode[pc_usize];

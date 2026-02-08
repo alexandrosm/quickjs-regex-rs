@@ -849,7 +849,10 @@ impl Regex {
         // Works with any number of states (no 1024-state limit).
         // Registers are ignored (treated as simple splits) — correct for match_end only.
         // Skip for patterns with lookahead — bit VM can't traverse those opcodes.
-        let bit_program = if use_pike && info.min_length > 0 && !info.has_lookahead {
+        // Skip for Unicode mode — byte-level NFA can't match \w on non-ASCII chars.
+        let bc_flags = u16::from_le_bytes([bytecode_vec[0], bytecode_vec[1]]);
+        let bc_unicode = (bc_flags & 0x10) != 0;
+        let bit_program = if use_pike && info.min_length > 0 && !info.has_lookahead && !bc_unicode {
             bitvm::BitVmProgram::compile(&bytecode_vec)
         } else {
             None
