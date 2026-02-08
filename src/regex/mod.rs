@@ -849,10 +849,7 @@ impl Regex {
         // Works with any number of states (no 1024-state limit).
         // Registers are ignored (treated as simple splits) — correct for match_end only.
         // Skip for patterns with lookahead — bit VM can't traverse those opcodes.
-        // Skip for Unicode mode — byte-level NFA can't match \w on non-ASCII chars.
-        let bc_flags = u16::from_le_bytes([bytecode_vec[0], bytecode_vec[1]]);
-        let bc_unicode = (bc_flags & 0x10) != 0;
-        let bit_program = if use_pike && info.min_length > 0 && !info.has_lookahead && !bc_unicode {
+        let bit_program = if use_pike && info.min_length > 0 && !info.has_lookahead {
             bitvm::BitVmProgram::compile(&bytecode_vec)
         } else {
             None
@@ -1923,8 +1920,22 @@ impl Regex {
                 let bytecode = self.bytecode_slice();
                 let text_bytes = text.as_bytes();
                 let vm = pikevm::PikeVm::new(bytecode, text_bytes);
-                return scratch.find_at(&vm, wide_nfa, start)
-                    .map(|(s, e)| Match { start: s, end: e });
+                if let Some((s, e)) = scratch.find_at(&vm, wide_nfa, start) {
+                    return Some(Match { start: s, end: e });
+                }
+                // Wide NFA found no match. In Unicode mode, the byte-level NFA
+                // may miss Unicode-specific matches. Fall back to exec.
+                if self.flags.contains(Flags::UNICODE) {
+                    return match vm.exec_with_scratch(scratch, start) {
+                        pikevm::PikeResult::Match(caps) => {
+                            let s = caps.get(0).copied().flatten()?;
+                            let e = caps.get(1).copied().flatten()?;
+                            Some(Match { start: s, end: e })
+                        }
+                        pikevm::PikeResult::NoMatch => None,
+                    };
+                }
+                return None;
             }
             // Fallback: exec with scratch (reuse buffers, no fresh allocation)
             let bytecode = self.bytecode_slice();
@@ -1967,12 +1978,15 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
-                // Wide NFA + bounded exec: fast scan, correct semantics
-                if let Some(ref prog) = self.bit_program {
-                    return self.count_matches_bit_scanner(text, prog);
-                }
-                // Fallback: PikeScanner for Pike VM patterns (DFA works for ASCII)
                 if self.use_pike_vm {
+                    let reg_count = self.bytecode_slice()[3] as usize;
+                    if reg_count > 0 {
+                        // Register patterns: Wide NFA + bounded exec (handles bounds correctly)
+                        if let Some(ref prog) = self.bit_program {
+                            return self.count_matches_bit_scanner(text, prog);
+                        }
+                    }
+                    // Register-free: PikeScanner DFA (fast, correct for greedy patterns)
                     return self.count_matches_pike(text);
                 }
                 self.find_iter(text).count()
