@@ -1978,15 +1978,9 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
+                // PikeScanner::count_all: DFA with byte-class equivalence for fast
+                // scanning + bounded exec for correct greedy/lazy/assertion semantics.
                 if self.use_pike_vm {
-                    let reg_count = self.bytecode_slice()[3] as usize;
-                    if reg_count > 0 {
-                        // Register patterns: Wide NFA + bounded exec (handles bounds correctly)
-                        if let Some(ref prog) = self.bit_program {
-                            return self.count_matches_bit_scanner(text, prog);
-                        }
-                    }
-                    // Register-free: PikeScanner DFA (fast, correct for greedy patterns)
                     return self.count_matches_pike(text);
                 }
                 self.find_iter(text).count()

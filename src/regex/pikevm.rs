@@ -1050,7 +1050,9 @@ impl Scratch {
     pub fn find_at(&mut self, vm: &PikeVm, wide_nfa: &super::bitvm::BitVmProgram, start_pos: usize) -> Option<(usize, usize)> {
         let match_end = wide_nfa.find_match_end(vm.input, start_pos)?;
 
-        let bounded_vm = PikeVm::new(vm.bytecode, &vm.input[..match_end]);
+        // Add padding: the Wide NFA's match_end may be slightly short for some patterns
+        let padded_end = (match_end + 200).min(vm.input_len);
+        let bounded_vm = PikeVm::new(vm.bytecode, &vm.input[..padded_end]);
         match bounded_vm.exec_reuse(
             &mut self.curr, &mut self.next,
             &mut self.eps_stack, &mut self.tmp_caps, &mut self.tmp_regs,
@@ -1159,11 +1161,12 @@ impl<'a> PikeScanner<'a> {
         // Pass 1: DFA scan for match_end (fast)
         let match_end = self.find_match_cached(start_pos)?;
 
-        // Pass 2: bounded exec only up to match_end to find match_start.
-        // This is critical for complex patterns (e.g. date regex with 3000 states):
-        // full exec would process O(remaining_text × states), but bounded exec
-        // only processes O(match_length × states).
-        let bounded_vm = PikeVm::new(self.vm.bytecode, &self.vm.input[..match_end]);
+        // Pass 2: bounded exec on input[..match_end + padding].
+        // The DFA's match_end is an approximation — the actual match might extend
+        // a few bytes further (e.g. for date regex with multi-char tokens).
+        // Add padding to avoid cutting off the real match.
+        let padded_end = (match_end + 200).min(self.vm.input_len);
+        let bounded_vm = PikeVm::new(self.vm.bytecode, &self.vm.input[..padded_end]);
         match bounded_vm.exec_reuse(
             &mut self.exec_curr, &mut self.exec_next,
             &mut self.exec_eps_stack, &mut self.exec_tmp_caps, &mut self.exec_tmp_regs,
@@ -1195,38 +1198,21 @@ impl<'a> PikeScanner<'a> {
 
     /// Count all non-overlapping matches.
     /// Uses Bucket Queue with DFA cache for all patterns (handles registers via timeline).
+    /// Count all non-overlapping matches using find_next (DFA + bounded exec).
+    /// The DFA with byte-class equivalence finds match_end fast.
+    /// The bounded exec gives correct greedy/lazy/assertion semantics.
+    /// All buffers reused across calls (generational indexing, zero alloc).
     pub fn count_all(&mut self) -> usize {
         let mut count = 0;
         let mut pos = 0;
 
-        // Use DFA-cached scan for register-free ASCII-safe patterns.
-        // Unicode mode patterns need exec_reuse (DFA allocates per non-ASCII byte).
-        if self.vm.register_count == 0 && !self.vm.unicode_mode {
-            while pos <= self.vm.input_len {
-                match self.find_match_cached(pos) {
-                    Some(end) => {
-                        count += 1;
-                        pos = if end > pos { end } else { pos + 1 };
-                    }
-                    None => break,
-                }
-            }
-            return count;
-        }
-
-        // For register patterns: use full exec with reused buffers
         while pos <= self.vm.input_len {
-            match self.vm.exec_reuse(
-                &mut self.exec_curr, &mut self.exec_next,
-                &mut self.exec_eps_stack, &mut self.exec_tmp_caps, &mut self.exec_tmp_regs,
-                pos,
-            ) {
-                PikeResult::Match(caps) => {
+            match self.find_next(pos) {
+                Some((start, end)) => {
                     count += 1;
-                    let end = caps.get(1).copied().flatten().unwrap_or(pos + 1);
-                    pos = if end > pos { end } else { pos + 1 };
+                    pos = if end > start { end } else { start + 1 };
                 }
-                PikeResult::NoMatch => break,
+                None => break,
             }
         }
 
