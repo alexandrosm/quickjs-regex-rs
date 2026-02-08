@@ -1968,8 +1968,10 @@ impl Regex {
                 if let Some(ref prog) = self.bit_program {
                     return self.count_matches_bit_scanner(text, prog);
                 }
-                // Fallback: find_iter (PikeScanner with own DFA + exec per match)
-                // Used for patterns without Wide NFA (lookahead, CHAR32, etc.)
+                // Fallback: PikeScanner for Pike VM patterns (DFA works for ASCII)
+                if self.use_pike_vm {
+                    return self.count_matches_pike(text);
+                }
                 self.find_iter(text).count()
             }
         }
