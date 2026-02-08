@@ -1192,21 +1192,46 @@ impl<'a> PikeScanner<'a> {
 
     /// Count all non-overlapping matches.
     /// Uses Bucket Queue with DFA cache for all patterns (handles registers via timeline).
-    /// Count all non-overlapping matches using find_next (DFA + bounded exec).
-    /// The DFA with byte-class equivalence finds match_end fast.
-    /// The bounded exec gives correct greedy/lazy/assertion semantics.
-    /// All buffers reused across calls (generational indexing, zero alloc).
+    /// Count all non-overlapping matches.
+    /// Uses find_next (DFA + bounded exec) for ASCII text.
+    /// For non-ASCII-heavy text or Unicode mode, uses exec_reuse directly
+    /// (the DFA's per-non-ASCII-byte overhead makes it slower than raw exec).
     pub fn count_all(&mut self) -> usize {
+        // Check if text is mostly non-ASCII (first 256 bytes sample)
+        let sample = &self.vm.input[..self.vm.input_len.min(256)];
+        let non_ascii = sample.iter().filter(|&&b| b >= 128).count();
+        let use_exec = self.vm.unicode_mode || non_ascii > sample.len() / 2;
+
         let mut count = 0;
         let mut pos = 0;
 
-        while pos <= self.vm.input_len {
-            match self.find_next(pos) {
-                Some((start, end)) => {
-                    count += 1;
-                    pos = if end > start { end } else { start + 1 };
+        if use_exec {
+            // Direct exec: no DFA overhead, correct for all patterns
+            while pos <= self.vm.input_len {
+                match self.vm.exec_reuse(
+                    &mut self.exec_curr, &mut self.exec_next,
+                    &mut self.exec_eps_stack, &mut self.exec_tmp_caps, &mut self.exec_tmp_regs,
+                    pos,
+                ) {
+                    PikeResult::Match(caps) => {
+                        count += 1;
+                        let end = caps.get(1).copied().flatten().unwrap_or(pos + 1);
+                        let start = caps.get(0).copied().flatten().unwrap_or(pos);
+                        pos = if end > start { end } else { start + 1 };
+                    }
+                    PikeResult::NoMatch => break,
                 }
-                None => break,
+            }
+        } else {
+            // DFA + bounded exec: fast for ASCII text
+            while pos <= self.vm.input_len {
+                match self.find_next(pos) {
+                    Some((start, end)) => {
+                        count += 1;
+                        pos = if end > start { end } else { start + 1 };
+                    }
+                    None => break,
+                }
             }
         }
 
@@ -1298,16 +1323,15 @@ impl<'a> PikeScanner<'a> {
 
             let b = vm.input[at];
             if b >= 128 {
-                // Non-ASCII: process this char via NFA (no DFA caching), then resume DFA.
-                // Use curr_states as temporary buffer (avoids .to_vec() allocation).
+                // Non-ASCII: multi-byte UTF-8 char. Can't use byte-class DFA cache
+                // (different chars share first bytes). Compute via NFA, create state.
                 let (c, char_len) = vm.next_char(at);
                 if char_len == 0 { break; }
 
                 curr_states.clear();
                 curr_states.extend_from_slice(dfa.get_state_set(current_dfa_state));
                 next_states.clear();
-                // Targeted seen clearing: only clear bits we're about to set
-                for s in seen.iter_mut() { *s = false; }
+                seen.fill(false);
 
                 for i in 0..curr_states.len() {
                     let pc = curr_states[i];
@@ -1338,7 +1362,7 @@ impl<'a> PikeScanner<'a> {
                 continue;
             }
 
-            // O(1) DFA transition lookup
+            // O(1) DFA transition lookup (ASCII bytes use byte-class cache)
             if let Some(next_id) = dfa.lookup(current_dfa_state, b) {
                 current_dfa_state = next_id;
                 at += 1;
@@ -1349,7 +1373,7 @@ impl<'a> PikeScanner<'a> {
             curr_states.clear();
             curr_states.extend_from_slice(dfa.get_state_set(current_dfa_state));
             next_states.clear();
-            for s in seen.iter_mut() { *s = false; }
+            seen.fill(false);
 
             let (c, char_len) = vm.next_char(at);
             if char_len == 0 { break; }
