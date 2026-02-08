@@ -2049,9 +2049,17 @@ impl Regex {
                 finder.finder.find_iter(text.as_bytes()).count()
             }
             _ => {
-                // PikeScanner::count_all: DFA with byte-class equivalence for fast
-                // scanning + bounded exec for correct greedy/lazy/assertion semantics.
                 if self.use_pike_vm {
+                    // For patterns with registers: use Wide NFA (no DFA state explosion)
+                    // + bounded exec. The PikeScanner DFA overflows for 96-pattern
+                    // alternations like noseyparker.
+                    let reg_count = self.bytecode_slice()[3] as usize;
+                    if reg_count > 0 {
+                        if let Some(ref prog) = self.bit_program {
+                            return self.count_matches_bit_scanner(text, prog);
+                        }
+                    }
+                    // For register-free: PikeScanner DFA (correct, fast for simple patterns)
                     return self.count_matches_pike(text);
                 }
                 self.find_iter(text).count()
