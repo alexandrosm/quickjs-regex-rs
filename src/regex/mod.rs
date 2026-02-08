@@ -1958,6 +1958,16 @@ impl Regex {
         None
     }
 
+    /// Sum of match span lengths for all non-overlapping matches.
+    /// Uses find_iter (persistent PikeScanner) for efficient iteration.
+    pub fn count_spans(&self, text: &str) -> usize {
+        let mut sum = 0;
+        for m in self.find_iter(text) {
+            sum += m.end - m.start;
+        }
+        sum
+    }
+
     /// Count all non-overlapping matches efficiently.
     ///
     /// This is optimized for counting and uses native Aho-Corasick iteration
