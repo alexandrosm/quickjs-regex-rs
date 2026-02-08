@@ -1915,13 +1915,15 @@ impl Regex {
     /// All buffers in Scratch — zero allocation per call. DFA cache warms across calls.
     fn find_at_linear_scratch(&self, text: &str, start: usize, scratch: &mut pikevm::Scratch) -> Option<Match> {
         if self.use_pike_vm {
-            if let Some(ref wide_nfa) = self.bit_program {
-                let text_bytes = text.as_bytes();
-                // Sample text: if mostly ASCII, Wide NFA works. If mostly non-ASCII
-                // (Russian/Cyrillic), skip Wide NFA (can't match non-ASCII \w).
-                let sample = &text_bytes[start..text_bytes.len().min(start + 256)];
-                let non_ascii = sample.iter().filter(|&&b| b >= 128).count();
-                if non_ascii <= sample.len() / 4 {
+            let text_bytes = text.as_bytes();
+            // Sample text ONCE at position 0 (not per-call from start).
+            // Determines if Wide NFA can handle this text.
+            let sample = &text_bytes[..text_bytes.len().min(256)];
+            let non_ascii = sample.iter().filter(|&&b| b >= 128).count();
+            let text_is_ascii = non_ascii <= sample.len() / 4;
+
+            if text_is_ascii {
+                if let Some(ref wide_nfa) = self.bit_program {
                     let bytecode = self.bytecode_slice();
                     let vm = pikevm::PikeVm::new(bytecode, text_bytes);
                     return scratch.find_at(&vm, wide_nfa, start)
