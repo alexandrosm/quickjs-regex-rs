@@ -1701,35 +1701,68 @@ impl Regex {
     #[inline]
     /// Find using selective prefilter to skip to candidate positions.
     fn find_at_with_selective_prefilter(&self, text: &str, start: usize) -> Option<Match> {
-        // Pike VM has its own prefix loop — single call is enough
-        if self.use_pike_vm {
-            return self.try_match_at(text, start);
-        }
         let bytes = text.as_bytes();
         let mut search_from = start;
-        while search_from <= text.len() {
-            // Find next literal occurrence
-            let remaining = &bytes[search_from..];
-            let lit_pos = match &self.selective_prefilter {
-                selective::Prefilter::MemmemStart(_) | selective::Prefilter::MemmemInner { .. } => {
-                    self.memmem_prefilter.as_ref()
-                        .and_then(|f| f.find(remaining))
-                        .map(|i| search_from + i)
-                }
-                selective::Prefilter::AhoCorasickStart(_) | selective::Prefilter::AhoCorasickInner { .. } => {
-                    self.ac_prefilter.as_ref()
-                        .and_then(|ac| ac.find(remaining))
-                        .map(|m| search_from + m.start())
-                }
-                _ => None,
-            };
 
+        if self.use_pike_vm {
+            // For Pike VM: use prefilter to jump to candidates, then windowed exec.
+            // This avoids O(N×M) full-text scanning for patterns like noseyparker
+            // (96 alternations with \b on 7MB text: AC finds ~55 candidates vs
+            // Pike VM scanning every byte with 2000 NFA states).
+            use std::cell::RefCell;
+            thread_local! {
+                static PF_SCRATCH: RefCell<Option<pikevm::Scratch>> = RefCell::new(None);
+            }
+            let bytecode = self.bytecode_slice();
+            return PF_SCRATCH.with(|cell| {
+                let mut scratch_opt = cell.borrow_mut();
+                let scratch = scratch_opt.get_or_insert_with(|| self.create_scratch());
+
+                while search_from < bytes.len() {
+                    let remaining = &bytes[search_from..];
+                    let lit_pos = self.find_next_prefilter_candidate(remaining, search_from);
+                    let lit_pos = match lit_pos {
+                        Some(p) => p,
+                        None => break,
+                    };
+
+                    let try_pos = match &self.selective_prefilter {
+                        selective::Prefilter::MemmemInner { min_prefix, .. }
+                        | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => {
+                            lit_pos.saturating_sub(*min_prefix).max(start)
+                        }
+                        _ => lit_pos,
+                    };
+
+                    // Windowed exec: only scan near the candidate, not the whole text.
+                    // 500 bytes past the literal covers any realistic suffix length.
+                    let window_end = (lit_pos + 500).min(bytes.len());
+                    let vm = pikevm::PikeVm::new(bytecode, &bytes[..window_end]);
+                    match vm.exec_with_scratch(scratch, try_pos) {
+                        pikevm::PikeResult::Match(caps) => {
+                            let s = caps.get(0).copied().flatten()?;
+                            let e = caps.get(1).copied().flatten()?;
+                            if s >= start {
+                                return Some(Match { start: s, end: e });
+                            }
+                        }
+                        pikevm::PikeResult::NoMatch => {}
+                    }
+                    search_from = lit_pos + 1;
+                }
+                None
+            });
+        }
+
+        // Non-Pike VM path: backtracker with prefilter scanning
+        while search_from <= text.len() {
+            let remaining = &bytes[search_from..];
+            let lit_pos = self.find_next_prefilter_candidate(remaining, search_from);
             let lit_pos = match lit_pos {
                 Some(p) => p,
-                None => break, // No more literal occurrences
+                None => break,
             };
 
-            // Calculate where to start trying the match
             let try_pos = match &self.selective_prefilter {
                 selective::Prefilter::MemmemInner { min_prefix, .. }
                 | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => {
@@ -1738,15 +1771,30 @@ impl Regex {
                 _ => lit_pos,
             };
 
-            // Try matching at the candidate position
             if let Some(m) = self.try_match_at(text, try_pos) {
                 return Some(m);
             }
-
-            // Failed — skip past this literal occurrence to find the next one
             search_from = lit_pos + 1;
         }
         None
+    }
+
+    /// Find next prefilter candidate position in remaining text.
+    #[inline]
+    fn find_next_prefilter_candidate(&self, remaining: &[u8], search_from: usize) -> Option<usize> {
+        match &self.selective_prefilter {
+            selective::Prefilter::MemmemStart(_) | selective::Prefilter::MemmemInner { .. } => {
+                self.memmem_prefilter.as_ref()
+                    .and_then(|f| f.find(remaining))
+                    .map(|i| search_from + i)
+            }
+            selective::Prefilter::AhoCorasickStart(_) | selective::Prefilter::AhoCorasickInner { .. } => {
+                self.ac_prefilter.as_ref()
+                    .and_then(|ac| ac.find(remaining))
+                    .map(|m| search_from + m.start())
+            }
+            _ => None,
+        }
     }
 
     fn find_at_linear(&self, text: &str, start: usize) -> Option<Match> {
@@ -2050,8 +2098,20 @@ impl Regex {
             }
             _ => {
                 if self.use_pike_vm {
-                    // For large patterns (>1000 NFA states): use Wide NFA to avoid
-                    // DFA state overflow. E.g., noseyparker with 96 alternatives.
+                    // Prefer AC/memmem prefilter: skips non-matching regions entirely.
+                    // This is critical for patterns like noseyparker (96 alternations
+                    // with \b prefixes on 7MB text): AC finds ~55 candidates vs
+                    // Wide NFA scanning every byte.
+                    let has_literal_prefilter = matches!(self.selective_prefilter,
+                        selective::Prefilter::MemmemStart(_) |
+                        selective::Prefilter::MemmemInner { .. } |
+                        selective::Prefilter::AhoCorasickStart(_) |
+                        selective::Prefilter::AhoCorasickInner { .. }
+                    );
+                    if has_literal_prefilter && text.len() > 1024 {
+                        return self.count_matches_pike_prefiltered(text);
+                    }
+                    // No prefilter — use Wide NFA for large patterns
                     if let Some(ref prog) = self.bit_program {
                         if prog.num_states > 100 {
                             return self.count_matches_bit_scanner(text, prog);

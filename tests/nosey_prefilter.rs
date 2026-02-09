@@ -35,4 +35,48 @@ fn test_noseyparker_prefilter() {
     }
     eprintln!("3 scans: {:?} ({:.1}ns/byte)",
         t.elapsed(), t.elapsed().as_nanos() as f64 / big.len() as f64 / 3.0);
+
+    // Test with embedded matches
+    let with_matches = format!(
+        "{}AKIAABCDEFGH01234567 {}ghp_abcdefghijklmnopqrstuvwxyz0123456789 {}",
+        "prefix text ".repeat(10000),
+        "middle text ".repeat(10000),
+        "suffix text ".repeat(10000),
+    );
+    let c = re.count_matches(&with_matches);
+    eprintln!("count with matches: {}", c);
+    assert_eq!(c, 2);
+
+    // Verify find_at finds the same matches
+    let mut find_count = 0;
+    let mut pos = 0;
+    while pos < with_matches.len() {
+        match re.find_at(&with_matches, pos) {
+            Some(m) => {
+                find_count += 1;
+                pos = if m.end > m.start { m.end } else { m.start + 1 };
+            }
+            None => break,
+        }
+    }
+    assert_eq!(find_count, 2, "find_at should find same matches as count_matches (both AKIA + ghp_)");
+
+    // Also test find_at path (used by rebar count-spans and grep models)
+    let t2 = std::time::Instant::now();
+    for _ in 0..3 {
+        let mut pos = 0;
+        let mut found = 0;
+        while pos < big.len() {
+            match re.find_at(&big, pos) {
+                Some(m) => {
+                    found += 1;
+                    pos = if m.end > m.start { m.end } else { m.start + 1 };
+                }
+                None => break,
+            }
+        }
+        assert_eq!(found, 0);
+    }
+    eprintln!("3 find_at scans: {:?} ({:.1}ns/byte)",
+        t2.elapsed(), t2.elapsed().as_nanos() as f64 / big.len() as f64 / 3.0);
 }
