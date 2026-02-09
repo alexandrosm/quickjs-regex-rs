@@ -49,6 +49,7 @@ pub use error::{Error, Result, ExecResult};
 pub use pikevm::Scratch;
 
 use std::ptr;
+use std::collections::HashMap;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use memchr::{memchr, memchr2, memchr3, memmem};
@@ -779,8 +780,8 @@ pub struct Regex {
     sub_patterns: Vec<Regex>,
     /// Shared AC automaton across all sub-pattern literals.
     sub_ac: Option<AhoCorasick>,
-    /// Maps AC pattern index → sub_patterns index.
-    ac_to_sub: Vec<usize>,
+    /// Maps AC pattern index → one or more sub-pattern indices.
+    ac_to_sub: Vec<Vec<usize>>,
 }
 
 /// Coverage details for decomposed large alternations.
@@ -2006,8 +2007,12 @@ impl Regex {
         };
         let sub = if !self.sub_patterns.is_empty() {
             let mut has_lits = vec![false; self.sub_patterns.len()];
-            for &idx in &self.ac_to_sub {
-                has_lits[idx] = true;
+            for sub_idxs in &self.ac_to_sub {
+                for &idx in sub_idxs {
+                    if idx < has_lits.len() {
+                        has_lits[idx] = true;
+                    }
+                }
             }
             let covered = has_lits.iter().filter(|&&x| x).count();
             let uncovered = self.sub_patterns.len() - covered;
@@ -2026,9 +2031,11 @@ impl Regex {
         }
 
         let mut has_literals = vec![false; self.sub_patterns.len()];
-        for &idx in &self.ac_to_sub {
-            if idx < has_literals.len() {
-                has_literals[idx] = true;
+        for sub_idxs in &self.ac_to_sub {
+            for &idx in sub_idxs {
+                if idx < has_literals.len() {
+                    has_literals[idx] = true;
+                }
             }
         }
 
@@ -2553,8 +2560,7 @@ impl Regex {
         };
 
         let mut sub_patterns: Vec<Regex> = Vec::new();
-        let mut all_ac_literals: Vec<Vec<u8>> = Vec::new();
-        let mut ac_to_sub: Vec<usize> = Vec::new();
+        let mut literal_to_subs: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
 
         for (i, alt) in alts.iter().enumerate() {
             // Compile each branch as an independent regex.
@@ -2580,16 +2586,29 @@ impl Regex {
             }
 
             for lit in &literals {
-                all_ac_literals.push(lit.clone());
-                ac_to_sub.push(i);
+                let key = lit.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>();
+                let entry = literal_to_subs.entry(key).or_default();
+                if !entry.contains(&i) {
+                    entry.push(i);
+                }
             }
 
             sub_patterns.push(sub_re);
         }
 
         // Need at least some literals to build a useful AC
-        if all_ac_literals.is_empty() {
+        if literal_to_subs.is_empty() {
             return;
+        }
+
+        let mut all_ac_literals = literal_to_subs.keys().cloned().collect::<Vec<_>>();
+        all_ac_literals.sort();
+        let mut ac_to_sub: Vec<Vec<usize>> = Vec::with_capacity(all_ac_literals.len());
+        for lit in &all_ac_literals {
+            let mut sub_idxs = literal_to_subs.get(lit).cloned().unwrap_or_default();
+            sub_idxs.sort_unstable();
+            sub_idxs.dedup();
+            ac_to_sub.push(sub_idxs);
         }
 
         // Use case-insensitive AC since many sub-patterns use (?i).
@@ -2752,8 +2771,12 @@ impl Regex {
 
         // Identify which sub-patterns have AC coverage
         let mut has_literals = vec![false; self.sub_patterns.len()];
-        for &sub_idx in &self.ac_to_sub {
-            has_literals[sub_idx] = true;
+        for sub_idxs in &self.ac_to_sub {
+            for &sub_idx in sub_idxs {
+                if sub_idx < has_literals.len() {
+                    has_literals[sub_idx] = true;
+                }
+            }
         }
 
         // Pre-create per-sub-pattern scratches to avoid thread-local conflicts
@@ -2768,43 +2791,48 @@ impl Regex {
                 None => break,
             };
             let abs_pos = pos + hit.start();
-            let sub_idx = self.ac_to_sub[hit.pattern().as_usize()];
-            let sub_re = &self.sub_patterns[sub_idx];
+            let sub_idxs = &self.ac_to_sub[hit.pattern().as_usize()];
+            let mut matched = false;
 
-            // Determine backup based on sub-pattern's prefilter
-            let backup = match &sub_re.selective_prefilter {
-                selective::Prefilter::MemmemInner { min_prefix, .. }
-                | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => *min_prefix + 10,
-                _ => 10,
-            };
-            // AST-derived literals can be far from match start (e.g. after .{0,100}),
-            // so keep a larger minimum backup for decomposed verification windows.
-            let backup = backup.max(128);
-            let forward = 300;
+            for &sub_idx in sub_idxs {
+                let sub_re = &self.sub_patterns[sub_idx];
 
-            let try_start = abs_pos.saturating_sub(backup).max(pos);
-            let window_end = (abs_pos + forward).min(text_bytes.len());
+                // Determine backup based on sub-pattern's prefilter
+                let backup = match &sub_re.selective_prefilter {
+                    selective::Prefilter::MemmemInner { min_prefix, .. }
+                    | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => *min_prefix + 10,
+                    _ => 10,
+                };
+                // AST-derived literals can be far from match start (e.g. after .{0,100}),
+                // so keep a larger minimum backup for decomposed verification windows.
+                let backup = backup.max(128);
+                let forward = 300;
 
-            // Include 1 byte before try_start for \b word boundary context.
-            // The Pike VM needs the preceding character to correctly evaluate \b.
-            let ctx_start = if try_start > 0 { try_start - 1 } else { 0 };
-            let exec_offset = try_start - ctx_start;
+                let try_start = abs_pos.saturating_sub(backup).max(pos);
+                let window_end = (abs_pos + forward).min(text_bytes.len());
 
-            // Use Pike VM directly with per-sub-pattern scratch
-            let bytecode = sub_re.bytecode_slice();
-            let window_bytes = &text_bytes[ctx_start..window_end];
-            let vm = pikevm::PikeVm::new(bytecode, window_bytes);
-            let result = vm.exec_with_scratch(&mut scratches[sub_idx], exec_offset);
-            match result {
-                pikevm::PikeResult::Match(caps) => {
+                // Include 1 byte before try_start for \b word boundary context.
+                // The Pike VM needs the preceding character to correctly evaluate \b.
+                let ctx_start = if try_start > 0 { try_start - 1 } else { 0 };
+                let exec_offset = try_start - ctx_start;
+
+                // Use Pike VM directly with per-sub-pattern scratch
+                let bytecode = sub_re.bytecode_slice();
+                let window_bytes = &text_bytes[ctx_start..window_end];
+                let vm = pikevm::PikeVm::new(bytecode, window_bytes);
+                let result = vm.exec_with_scratch(&mut scratches[sub_idx], exec_offset);
+                if let pikevm::PikeResult::Match(caps) = result {
                     count += 1;
                     let rel_end = caps.get(1).copied().flatten().unwrap_or(exec_offset + 1);
                     let abs_end = ctx_start + rel_end;
                     pos = if abs_end > abs_pos { abs_end } else { abs_pos + 1 };
+                    matched = true;
+                    break;
                 }
-                pikevm::PikeResult::NoMatch => {
-                    pos = abs_pos + 1;
-                }
+            }
+
+            if !matched {
+                pos = abs_pos + 1;
             }
         }
 
