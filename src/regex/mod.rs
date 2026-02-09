@@ -2089,8 +2089,15 @@ impl Regex {
                 Some(end) => end,
                 None => break,
             };
+            // Bounded verification: start Pike VM near match_end, not from pos.
+            // The Wide NFA tells us WHERE a match ends. The match must START
+            // within max_backup bytes before match_end. This avoids scanning
+            // millions of bytes when match_end is far from pos.
+            // Use full text prefix (not a slice) so word boundary checks work.
+            let max_backup = 500;
+            let exec_start = match_end.saturating_sub(max_backup).max(pos);
             let bounded_vm = pikevm::PikeVm::new(bytecode, &text_bytes[..match_end]);
-            match bounded_vm.exec_with_scratch(&mut scratch, pos) {
+            match bounded_vm.exec_with_scratch(&mut scratch, exec_start) {
                 pikevm::PikeResult::Match(caps) => {
                     count += 1;
                     let end = caps.get(1).copied().flatten().unwrap_or(pos + 1);
