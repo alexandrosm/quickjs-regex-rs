@@ -2712,6 +2712,11 @@ impl Regex {
             has_literals[sub_idx] = true;
         }
 
+        // Pre-create per-sub-pattern scratches to avoid thread-local conflicts
+        let mut scratches: Vec<pikevm::Scratch> = self.sub_patterns.iter()
+            .map(|sub| sub.create_scratch())
+            .collect();
+
         // AC-based counting for sub-patterns with literals
         while pos < text_bytes.len() {
             let hit = match ac.find(&text_bytes[pos..]) {
@@ -2732,15 +2737,22 @@ impl Regex {
 
             let window_start = abs_pos.saturating_sub(backup).max(pos);
             let window_end = (abs_pos + forward).min(text_bytes.len());
-            let window = &text[window_start..window_end];
 
-            if let Some(m) = sub_re.find_at(window, 0) {
-                count += 1;
-                let abs_end = window_start + m.end;
-                pos = if abs_end > abs_pos { abs_end } else { abs_pos + 1 };
-                continue;
+            // Use Pike VM directly with per-sub-pattern scratch (avoids thread-local conflicts)
+            let bytecode = sub_re.bytecode_slice();
+            let window_bytes = &text_bytes[window_start..window_end];
+            let vm = pikevm::PikeVm::new(bytecode, window_bytes);
+            match vm.exec_with_scratch(&mut scratches[sub_idx], 0) {
+                pikevm::PikeResult::Match(caps) => {
+                    count += 1;
+                    let rel_end = caps.get(1).copied().flatten().unwrap_or(1);
+                    let abs_end = window_start + rel_end;
+                    pos = if abs_end > abs_pos { abs_end } else { abs_pos + 1 };
+                }
+                pikevm::PikeResult::NoMatch => {
+                    pos = abs_pos + 1;
+                }
             }
-            pos = abs_pos + 1;
         }
 
         // Full scan for sub-patterns without extractable literals

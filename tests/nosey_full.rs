@@ -155,4 +155,18 @@ fn test_noseyparker_full() {
         elapsed,
         elapsed.as_nanos() as f64 / big.len() as f64 / 3.0
     );
+
+    // Test with rebar-style pattern (bare | join, no (?:...) wrapping)
+    let rebar_combined = PATTERNS.join("|");
+    let re2 = Regex::new(&rebar_combined).unwrap();
+    eprintln!("rebar-style debug: {}", re2.debug_info());
+    let count2 = re2.count_matches(small_text);
+    eprintln!("rebar-style count on small text: {}", count2);
+    assert!(count2 >= 1, "rebar-style: expected at least 1 match on small text");
+
+    // Test with UTF-8 text containing multi-byte characters
+    let utf8_text = "abc \u{00e9}\u{00f1}\u{00fc} ghp_abcdefghijklmnopqrstuvwxyz0123456789 \u{1f600} end";
+    let count_utf8 = re2.count_matches(utf8_text);
+    eprintln!("rebar-style count on UTF-8 text: {}", count_utf8);
+    assert!(count_utf8 >= 1, "rebar-style: expected at least 1 match on UTF-8 text");
 }
