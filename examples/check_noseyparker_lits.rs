@@ -53,6 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut pattern_file: Option<String> = None;
     let mut haystack_file: Option<String> = None;
     let mut per_pattern = false;
+    let mut find_iter_count = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -67,12 +68,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             "--per-pattern" => {
                 per_pattern = true;
             }
+            "--find-iter" => {
+                find_iter_count = true;
+            }
             "--help" | "-h" => {
                 println!("Usage:");
                 println!("  cargo run --release --example check_noseyparker_lits");
                 println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file>");
                 println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file> --haystack <file>");
                 println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file> --haystack <file> --per-pattern");
+                println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file> --haystack <file> --find-iter");
                 return Ok(());
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -139,6 +144,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             for (i, c, pat) in nonzero.iter().take(20) {
                 println!("  idx={} count={} pat={}", i, c, pat);
             }
+        }
+
+        if find_iter_count {
+            let fi_start = Instant::now();
+            let fi_count = re.find_iter(&hay).count();
+            let fi_elapsed = fi_start.elapsed();
+            println!("find_iter_count={}", fi_count);
+            println!("find_iter_elapsed={:?}", fi_elapsed);
         }
 
         let start = Instant::now();
