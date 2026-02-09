@@ -783,6 +783,19 @@ pub struct Regex {
     ac_to_sub: Vec<usize>,
 }
 
+/// Coverage details for decomposed large alternations.
+#[derive(Debug, Clone)]
+pub struct DecompositionCoverage {
+    /// Number of compiled sub-patterns.
+    pub total_sub_patterns: usize,
+    /// Number of literals in the shared AC prefilter.
+    pub ac_literal_count: usize,
+    /// Number of sub-patterns that have at least one AC literal.
+    pub covered_sub_patterns: usize,
+    /// Sub-patterns that had no extracted AC literal.
+    pub uncovered_patterns: Vec<String>,
+}
+
 // Regex is Send + Sync since the bytecode is immutable after compilation
 unsafe impl Send for Regex {}
 unsafe impl Sync for Regex {}
@@ -2006,6 +2019,32 @@ impl Regex {
         format!("pike={} prefilter={} bitvm={} ac={}{}", self.use_pike_vm, pf, bit, self.ac_prefilter.is_some(), sub)
     }
 
+    /// Return literal coverage details for decomposed alternation mode.
+    pub fn decomposition_coverage(&self) -> Option<DecompositionCoverage> {
+        if self.sub_patterns.is_empty() {
+            return None;
+        }
+
+        let mut has_literals = vec![false; self.sub_patterns.len()];
+        for &idx in &self.ac_to_sub {
+            if idx < has_literals.len() {
+                has_literals[idx] = true;
+            }
+        }
+
+        let uncovered_patterns = self.sub_patterns.iter()
+            .zip(has_literals.iter())
+            .filter_map(|(sub, has)| if *has { None } else { Some(sub.pattern.clone()) })
+            .collect::<Vec<_>>();
+
+        Some(DecompositionCoverage {
+            total_sub_patterns: self.sub_patterns.len(),
+            ac_literal_count: self.ac_to_sub.len(),
+            covered_sub_patterns: has_literals.iter().filter(|&&x| x).count(),
+            uncovered_patterns,
+        })
+    }
+
     /// Create a reusable scratch space for this regex. Allocate once, pass to
     /// `find_at` for zero-allocation matching. Each thread should own its own Scratch.
     pub fn create_scratch(&self) -> pikevm::Scratch {
@@ -2512,8 +2551,6 @@ impl Regex {
             Some(a) if a.len() > 10 => a,
             _ => return,
         };
-        // DEBUG: temporarily skip decomposition to test old path
-        if std::env::var("SKIP_DECOMPOSE").is_ok() { return; }
 
         let mut sub_patterns: Vec<Regex> = Vec::new();
         let mut all_ac_literals: Vec<Vec<u8>> = Vec::new();
@@ -2712,7 +2749,6 @@ impl Regex {
         let text_bytes = text.as_bytes();
         let mut count = 0;
         let mut pos = 0;
-        let mut ac_candidates = 0usize;
 
         // Identify which sub-patterns have AC coverage
         let mut has_literals = vec![false; self.sub_patterns.len()];
@@ -2731,7 +2767,6 @@ impl Regex {
                 Some(m) => m,
                 None => break,
             };
-            ac_candidates += 1;
             let abs_pos = pos + hit.start();
             let sub_idx = self.ac_to_sub[hit.pattern().as_usize()];
             let sub_re = &self.sub_patterns[sub_idx];
@@ -2757,14 +2792,6 @@ impl Regex {
             let window_bytes = &text_bytes[ctx_start..window_end];
             let vm = pikevm::PikeVm::new(bytecode, window_bytes);
             let result = vm.exec_with_scratch(&mut scratches[sub_idx], exec_offset);
-            if ac_candidates <= 5 {
-                let lit_bytes = &text_bytes[abs_pos..abs_pos.saturating_add(20).min(text_bytes.len())];
-                let lit_str = String::from_utf8_lossy(lit_bytes);
-                eprintln!("  candidate #{}: sub[{}] abs_pos={} backup={} exec_offset={} window_len={} lit={:?} result={}",
-                    ac_candidates, sub_idx, abs_pos, backup, exec_offset, window_bytes.len(),
-                    &lit_str[..lit_str.len().min(20)],
-                    match &result { pikevm::PikeResult::Match(_) => "MATCH", pikevm::PikeResult::NoMatch => "NO" });
-            }
             match result {
                 pikevm::PikeResult::Match(caps) => {
                     count += 1;
@@ -2777,8 +2804,6 @@ impl Regex {
                 }
             }
         }
-
-        eprintln!("[decomposed] ac_candidates={} verified_count={} text_len={}", ac_candidates, count, text_bytes.len());
 
         // Full scan for sub-patterns without extractable literals
         for (i, sub_re) in self.sub_patterns.iter().enumerate() {
