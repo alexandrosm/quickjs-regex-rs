@@ -2167,7 +2167,7 @@ impl Regex {
                             return self.count_matches_bit_scanner(text, prog);
                         }
                     }
-                    return self.count_matches_pike(text);
+                    return self.find_iter(text).count();
                 }
                 self.find_iter(text).count()
             }

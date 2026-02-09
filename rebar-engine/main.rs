@@ -117,6 +117,12 @@ fn model_count_spans(
     mode: Mode,
 ) -> anyhow::Result<Vec<timer::Sample>> {
     let haystack = b.haystack_str()?;
+    if matches!(mode, Mode::PureRust) {
+        return timer::run(b, || {
+            let sum: usize = re.find_iter(haystack).map(|m| m.end - m.start).sum();
+            Ok(sum)
+        });
+    }
     timer::run(b, || {
         let mut sum = 0;
         let mut pos = 0;
