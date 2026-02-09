@@ -2639,26 +2639,29 @@ impl Regex {
         let ir = selective::from_ast(&ast);
         let info = selective::analyze(&ir);
 
-        // Try required_literals first (must appear in any match)
-        let best_required = info.required_literals.iter()
-            .filter(|s| s.len() >= 2)
-            .max_by_key(|s| s.len());
-
-        if let Some(lit) = best_required {
-            return Some(vec![lit.as_bytes().to_vec()]);
-        }
-
-        // Try possible_literals (alternation branches)
-        let possible: Vec<Vec<u8>> = info.possible_literals.iter()
+        // Keep a small set of literals to improve recall when one literal choice
+        // is poor for a particular haystack.
+        let mut lits: Vec<Vec<u8>> = info.required_literals.iter()
             .filter(|s| s.len() >= 2)
             .map(|s| s.as_bytes().to_vec())
             .collect();
 
-        if possible.len() >= 2 {
-            return Some(possible);
+        lits.extend(
+            info.possible_literals.iter()
+                .filter(|s| s.len() >= 2)
+                .map(|s| s.as_bytes().to_vec())
+        );
+
+        if lits.is_empty() {
+            return None;
         }
 
-        None
+        lits.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        lits.dedup();
+        if lits.len() > 16 {
+            lits.truncate(16);
+        }
+        Some(lits)
     }
 
     /// Compile a sub-pattern without triggering further decomposition.
@@ -2805,8 +2808,8 @@ impl Regex {
                 };
                 // AST-derived literals can be far from match start (e.g. after .{0,100}),
                 // so keep a larger minimum backup for decomposed verification windows.
-                let backup = backup.max(2048);
-                let forward = 2048;
+                let backup = backup.max(128);
+                let forward = 300;
 
                 let try_start = abs_pos.saturating_sub(backup).max(pos);
                 let window_end = (abs_pos + forward).min(text_bytes.len());
