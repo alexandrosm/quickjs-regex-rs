@@ -1955,6 +1955,27 @@ impl Regex {
         format!("{:?}", self.strategy)
     }
 
+    /// Debug info: selective prefilter type, use_pike_vm, bit_program stats
+    pub fn debug_info(&self) -> String {
+        let pf = match &self.selective_prefilter {
+            selective::Prefilter::None => "None".to_string(),
+            selective::Prefilter::AnchoredStart => "AnchoredStart".to_string(),
+            selective::Prefilter::SingleByte(b) => format!("SingleByte(0x{:02x})", b),
+            selective::Prefilter::ByteSet(bs) => format!("ByteSet({} bytes)", bs.len()),
+            selective::Prefilter::MemmemStart(n) => format!("MemmemStart({:?})", String::from_utf8_lossy(n)),
+            selective::Prefilter::MemmemInner { needle, min_prefix } =>
+                format!("MemmemInner({:?}, prefix={})", String::from_utf8_lossy(needle), min_prefix),
+            selective::Prefilter::AhoCorasickStart(pats) => format!("AhoCorasickStart({} patterns)", pats.len()),
+            selective::Prefilter::AhoCorasickInner { patterns, min_prefix } =>
+                format!("AhoCorasickInner({} patterns, prefix={})", patterns.len(), min_prefix),
+        };
+        let bit = match &self.bit_program {
+            Some(p) => format!("BitVm({} states)", p.num_states),
+            None => "None".to_string(),
+        };
+        format!("pike={} prefilter={} bitvm={} ac={}", self.use_pike_vm, pf, bit, self.ac_prefilter.is_some())
+    }
+
     /// Create a reusable scratch space for this regex. Allocate once, pass to
     /// `find_at` for zero-allocation matching. Each thread should own its own Scratch.
     pub fn create_scratch(&self) -> pikevm::Scratch {
@@ -2050,10 +2071,6 @@ impl Regex {
             }
             _ => {
                 if self.use_pike_vm {
-                    // Prefer AC/memmem prefilter: skips non-matching regions entirely.
-                    // This is critical for patterns like noseyparker (96 alternations
-                    // with \b prefixes on 7MB text): AC finds ~55 candidates vs
-                    // Wide NFA scanning every byte.
                     let has_literal_prefilter = matches!(self.selective_prefilter,
                         selective::Prefilter::MemmemStart(_) |
                         selective::Prefilter::MemmemInner { .. } |
@@ -2063,7 +2080,6 @@ impl Regex {
                     if has_literal_prefilter && text.len() > 1024 {
                         return self.count_matches_pike_prefiltered(text);
                     }
-                    // No prefilter — use Wide NFA for large patterns
                     if let Some(ref prog) = self.bit_program {
                         if prog.num_states > 100 {
                             return self.count_matches_bit_scanner(text, prog);
@@ -2180,24 +2196,27 @@ impl Regex {
             };
 
             let window_start = lit_pos.saturating_sub(backup);
-            let window_end = (lit_pos + forward).min(text_bytes.len());
-            let window = &text_bytes[window_start..window_end];
 
-            // Stage 1: Wide NFA fast rejection (O(window × states/64)).
-            // Rejects ~99% of false AC candidates without Pike VM cost.
+            // Stage 1: Wide NFA fast rejection on SMALL window (100 bytes).
+            // The NFA reaches MATCH as soon as it sees the min-length match,
+            // so 100 bytes covers all patterns with min_match < 100.
+            // This is much cheaper than a 300-byte NFA check (~3× faster).
             if let Some(ref prog) = self.bit_program {
-                if !prog.has_match(window) {
+                let nfa_end = (lit_pos + 100).min(text_bytes.len());
+                let nfa_window = &text_bytes[window_start..nfa_end];
+                if !prog.has_match(nfa_window) {
                     search_from = lit_pos + 1;
                     continue;
                 }
             }
 
-            // Stage 2: Pike VM exec for exact match (captures, word boundaries).
+            // Stage 2: Pike VM exec on larger window for exact match.
+            let window_end = (lit_pos + forward).min(text_bytes.len());
+            let window = &text_bytes[window_start..window_end];
             let vm = pikevm::PikeVm::new(bytecode, window);
             match vm.exec_with_scratch(&mut scratch, 0) {
                 pikevm::PikeResult::Match(caps) => {
                     count += 1;
-                    // Translate window-relative end back to absolute
                     let rel_end = caps.get(1).copied().flatten().unwrap_or(1);
                     let abs_end = window_start + rel_end;
                     search_from = if abs_end > window_start { abs_end } else { lit_pos + 1 };

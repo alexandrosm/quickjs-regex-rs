@@ -126,6 +126,7 @@ fn test_noseyparker_full() {
 
     // Strategy
     eprintln!("strategy: {}", re.strategy_name());
+    eprintln!("debug: {}", re.debug_info());
 
     // Small text with a matching GitHub PAT
     let small_text = "here is a token ghp_abcdefghijklmnopqrstuvwxyz0123456789 in the text";
