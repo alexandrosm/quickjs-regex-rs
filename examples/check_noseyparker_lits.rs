@@ -54,6 +54,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut haystack_file: Option<String> = None;
     let mut per_pattern = false;
     let mut find_iter_count = false;
+    let mut c_engine_count = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -71,6 +72,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             "--find-iter" => {
                 find_iter_count = true;
             }
+            "--c-engine" => {
+                c_engine_count = true;
+            }
             "--help" | "-h" => {
                 println!("Usage:");
                 println!("  cargo run --release --example check_noseyparker_lits");
@@ -78,6 +82,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file> --haystack <file>");
                 println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file> --haystack <file> --per-pattern");
                 println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file> --haystack <file> --find-iter");
+                println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file> --haystack <file> --c-engine");
                 return Ok(());
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -152,6 +157,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             let fi_elapsed = fi_start.elapsed();
             println!("find_iter_count={}", fi_count);
             println!("find_iter_elapsed={:?}", fi_elapsed);
+        }
+
+        if c_engine_count {
+            let ce_start = Instant::now();
+            let mut c = 0usize;
+            let mut pos = 0usize;
+            while pos < hay.len() {
+                match re.find_at_c_engine(&hay, pos) {
+                    Some(m) => {
+                        c += 1;
+                        pos = if m.end > m.start { m.end } else { m.start + 1 };
+                    }
+                    None => break,
+                }
+            }
+            let ce_elapsed = ce_start.elapsed();
+            println!("c_engine_count={}", c);
+            println!("c_engine_elapsed={:?}", ce_elapsed);
         }
 
         let start = Instant::now();
