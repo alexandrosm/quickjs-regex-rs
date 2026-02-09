@@ -2805,8 +2805,8 @@ impl Regex {
                 };
                 // AST-derived literals can be far from match start (e.g. after .{0,100}),
                 // so keep a larger minimum backup for decomposed verification windows.
-                let backup = backup.max(128);
-                let forward = 300;
+                let backup = backup.max(2048);
+                let forward = 2048;
 
                 let try_start = abs_pos.saturating_sub(backup).max(pos);
                 let window_end = (abs_pos + forward).min(text_bytes.len());
