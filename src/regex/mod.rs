@@ -899,7 +899,9 @@ impl Regex {
 
         // Decompose large top-level alternations into sub-patterns.
         // Each branch gets its own small Regex for cheap per-candidate verification.
-        regex.try_decompose_alternation(pattern, final_flags);
+        // Use original `flags` (not final_flags) so inline flags like (?i) from
+        // the first alternative don't leak to other alternatives.
+        regex.try_decompose_alternation(pattern, flags);
 
         Ok(regex)
     }
@@ -2708,6 +2710,7 @@ impl Regex {
         let text_bytes = text.as_bytes();
         let mut count = 0;
         let mut pos = 0;
+        let mut ac_candidates = 0usize;
 
         // Identify which sub-patterns have AC coverage
         let mut has_literals = vec![false; self.sub_patterns.len()];
@@ -2726,6 +2729,7 @@ impl Regex {
                 Some(m) => m,
                 None => break,
             };
+            ac_candidates += 1;
             let abs_pos = pos + hit.start();
             let sub_idx = self.ac_to_sub[hit.pattern().as_usize()];
             let sub_re = &self.sub_patterns[sub_idx];
@@ -2762,6 +2766,8 @@ impl Regex {
                 }
             }
         }
+
+        eprintln!("[decomposed] ac_candidates={} verified_count={} text_len={}", ac_candidates, count, text_bytes.len());
 
         // Full scan for sub-patterns without extractable literals
         for (i, sub_re) in self.sub_patterns.iter().enumerate() {
