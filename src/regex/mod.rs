@@ -2754,7 +2754,16 @@ impl Regex {
             let bytecode = sub_re.bytecode_slice();
             let window_bytes = &text_bytes[ctx_start..window_end];
             let vm = pikevm::PikeVm::new(bytecode, window_bytes);
-            match vm.exec_with_scratch(&mut scratches[sub_idx], exec_offset) {
+            let result = vm.exec_with_scratch(&mut scratches[sub_idx], exec_offset);
+            if ac_candidates <= 5 {
+                let lit_bytes = &text_bytes[abs_pos..abs_pos.saturating_add(20).min(text_bytes.len())];
+                let lit_str = String::from_utf8_lossy(lit_bytes);
+                eprintln!("  candidate #{}: sub[{}] abs_pos={} backup={} exec_offset={} window_len={} lit={:?} result={}",
+                    ac_candidates, sub_idx, abs_pos, backup, exec_offset, window_bytes.len(),
+                    &lit_str[..lit_str.len().min(20)],
+                    match &result { pikevm::PikeResult::Match(_) => "MATCH", pikevm::PikeResult::NoMatch => "NO" });
+            }
+            match result {
                 pikevm::PikeResult::Match(caps) => {
                     count += 1;
                     let rel_end = caps.get(1).copied().flatten().unwrap_or(exec_offset + 1);
