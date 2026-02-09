@@ -2512,6 +2512,8 @@ impl Regex {
             Some(a) if a.len() > 10 => a,
             _ => return,
         };
+        // DEBUG: temporarily skip decomposition to test old path
+        if std::env::var("SKIP_DECOMPOSE").is_ok() { return; }
 
         let mut sub_patterns: Vec<Regex> = Vec::new();
         let mut all_ac_literals: Vec<Vec<u8>> = Vec::new();
