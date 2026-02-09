@@ -774,6 +774,13 @@ pub struct Regex {
     ac_prefilter: Option<AhoCorasick>,
     /// Memmem finder for single-literal prefiltering
     memmem_prefilter: Option<memmem::Finder<'static>>,
+    /// Sub-patterns for decomposed large alternations.
+    /// Each is a separately compiled Regex for one alternative.
+    sub_patterns: Vec<Regex>,
+    /// Shared AC automaton across all sub-pattern literals.
+    sub_ac: Option<AhoCorasick>,
+    /// Maps AC pattern index → sub_patterns index.
+    ac_to_sub: Vec<usize>,
 }
 
 // Regex is Send + Sync since the bytecode is immutable after compilation
@@ -874,7 +881,7 @@ impl Regex {
             None
         };
 
-        Ok(Regex {
+        let mut regex = Regex {
             bit_program,
             bytecode: bytecode_ptr,
             pattern: pattern.to_string(),
@@ -885,7 +892,16 @@ impl Regex {
             use_pike_vm: use_pike,
             ac_prefilter,
             memmem_prefilter,
-        })
+            sub_patterns: Vec::new(),
+            sub_ac: None,
+            ac_to_sub: Vec::new(),
+        };
+
+        // Decompose large top-level alternations into sub-patterns.
+        // Each branch gets its own small Regex for cheap per-candidate verification.
+        regex.try_decompose_alternation(pattern, final_flags);
+
+        Ok(regex)
     }
 
     /// Alias for with_flags — kept for API compatibility
@@ -1973,7 +1989,19 @@ impl Regex {
             Some(p) => format!("BitVm({} states)", p.num_states),
             None => "None".to_string(),
         };
-        format!("pike={} prefilter={} bitvm={} ac={}", self.use_pike_vm, pf, bit, self.ac_prefilter.is_some())
+        let sub = if !self.sub_patterns.is_empty() {
+            let mut has_lits = vec![false; self.sub_patterns.len()];
+            for &idx in &self.ac_to_sub {
+                has_lits[idx] = true;
+            }
+            let covered = has_lits.iter().filter(|&&x| x).count();
+            let uncovered = self.sub_patterns.len() - covered;
+            format!(" sub_patterns={} sub_ac_lits={} covered={} uncovered={}",
+                self.sub_patterns.len(), self.ac_to_sub.len(), covered, uncovered)
+        } else {
+            String::new()
+        };
+        format!("pike={} prefilter={} bitvm={} ac={}{}", self.use_pike_vm, pf, bit, self.ac_prefilter.is_some(), sub)
     }
 
     /// Create a reusable scratch space for this regex. Allocate once, pass to
@@ -2062,6 +2090,10 @@ impl Regex {
     /// This is optimized for counting and uses native Aho-Corasick iteration
     /// for alternation patterns, which is faster than repeated find_at calls.
     pub fn count_matches(&self, text: &str) -> usize {
+        // Decomposed large alternation: use shared AC + small sub-pattern verification
+        if !self.sub_patterns.is_empty() && self.sub_ac.is_some() {
+            return self.count_matches_decomposed(text);
+        }
         match &self.strategy {
             SearchStrategy::AlternationLiterals { ac, .. } => {
                 ac.find_iter(text.as_bytes()).count()
@@ -2468,6 +2500,258 @@ impl Regex {
             };
         }
         self.captures_at(text, start)
+    }
+
+    /// Attempt to decompose a large top-level alternation into sub-patterns.
+    /// Each branch is compiled as a separate small Regex with its own prefilter.
+    /// A shared AC automaton is built from all sub-pattern literals.
+    fn try_decompose_alternation(&mut self, pattern: &str, flags: Flags) {
+        let alts = match split_top_level_alternation(pattern) {
+            Some(a) if a.len() > 10 => a,
+            _ => return,
+        };
+
+        let mut sub_patterns: Vec<Regex> = Vec::new();
+        let mut all_ac_literals: Vec<Vec<u8>> = Vec::new();
+        let mut ac_to_sub: Vec<usize> = Vec::new();
+
+        for (i, alt) in alts.iter().enumerate() {
+            // Compile each branch as an independent regex.
+            // Wrap in (?:...) to preserve grouping semantics.
+            let sub_pattern = format!("(?:{})", alt);
+            let sub_re = match Regex::compile_sub_pattern(&sub_pattern, flags) {
+                Some(r) => r,
+                None => {
+                    // If any branch fails to compile, abort decomposition
+                    return;
+                }
+            };
+
+            // Extract literals from this sub-pattern's selective prefilter.
+            let mut literals = sub_re.extract_prefilter_literals();
+
+            // If selective prefilter didn't yield good AC literals (>= 2 bytes),
+            // try to extract from required_literals via fresh AST analysis.
+            if literals.is_empty() {
+                if let Some(lits) = Self::extract_literals_from_ast(&sub_pattern, flags) {
+                    literals = lits;
+                }
+            }
+
+            for lit in &literals {
+                all_ac_literals.push(lit.clone());
+                ac_to_sub.push(i);
+            }
+
+            sub_patterns.push(sub_re);
+        }
+
+        // Need at least some literals to build a useful AC
+        if all_ac_literals.is_empty() {
+            return;
+        }
+
+        let sub_ac = AhoCorasickBuilder::new()
+            .match_kind(MatchKind::LeftmostFirst)
+            .build(&all_ac_literals)
+            .ok();
+
+        if sub_ac.is_none() {
+            return;
+        }
+
+        self.sub_patterns = sub_patterns;
+        self.sub_ac = sub_ac;
+        self.ac_to_sub = ac_to_sub;
+    }
+
+    /// Extract literal strings from AST analysis for a sub-pattern.
+    /// Uses required_literals (must appear in any match) and possible_literals.
+    fn extract_literals_from_ast(pattern: &str, flags: Flags) -> Option<Vec<Vec<u8>>> {
+        let (processed, extracted_flags) = extract_inline_flags(pattern);
+        let mut final_flags = flags;
+        final_flags.insert(extracted_flags.bits());
+
+        let ast = compiler::parser::parse(&processed, final_flags).ok()?;
+        let ir = selective::from_ast(&ast);
+        let info = selective::analyze(&ir);
+
+        // Try required_literals first (must appear in any match)
+        let best_required = info.required_literals.iter()
+            .filter(|s| s.len() >= 2)
+            .max_by_key(|s| s.len());
+
+        if let Some(lit) = best_required {
+            return Some(vec![lit.as_bytes().to_vec()]);
+        }
+
+        // Try possible_literals (alternation branches)
+        let possible: Vec<Vec<u8>> = info.possible_literals.iter()
+            .filter(|s| s.len() >= 2)
+            .map(|s| s.as_bytes().to_vec())
+            .collect();
+
+        if possible.len() >= 2 {
+            return Some(possible);
+        }
+
+        None
+    }
+
+    /// Compile a sub-pattern without triggering further decomposition.
+    fn compile_sub_pattern(pattern: &str, flags: Flags) -> Option<Regex> {
+        let (processed_pattern, extracted_flags) = extract_inline_flags(pattern);
+        let mut final_flags = flags;
+        final_flags.insert(extracted_flags.bits());
+
+        let ast = compiler::parser::parse(&processed_pattern, final_flags).ok()?;
+        let mut bytecode_vec = compiler::compile_regex(&processed_pattern, final_flags).ok()?;
+        let bytecode_ptr = bytecode_vec.as_mut_ptr();
+        let strategy = analyze_pattern(&processed_pattern, final_flags);
+
+        let ir = selective::from_ast(&ast);
+        let info = selective::analyze(&ir);
+        let sel_prefilter = selective::derive_prefilter(&info);
+
+        let (ac_prefilter, memmem_prefilter) = match &sel_prefilter {
+            selective::Prefilter::AhoCorasickStart(patterns)
+            | selective::Prefilter::AhoCorasickInner { patterns, .. }
+                if patterns.len() >= 2 =>
+            {
+                let ac = AhoCorasickBuilder::new()
+                    .match_kind(MatchKind::LeftmostFirst)
+                    .build(patterns)
+                    .ok();
+                (ac, None)
+            }
+            selective::Prefilter::MemmemStart(needle)
+            | selective::Prefilter::MemmemInner { needle, .. }
+                if needle.len() >= 2 =>
+            {
+                let boxed: Box<[u8]> = needle.clone().into_boxed_slice();
+                let leaked: &'static [u8] = Box::leak(boxed);
+                let finder = memmem::Finder::new(leaked);
+                (None, Some(finder))
+            }
+            _ => (None, None),
+        };
+
+        let has_lookahead_opcodes = {
+            let mut pc = 8;
+            let bc_body_len = u32::from_le_bytes([
+                bytecode_vec[4], bytecode_vec[5], bytecode_vec[6], bytecode_vec[7],
+            ]) as usize;
+            let bc_end = 8 + bc_body_len;
+            let mut found = false;
+            while pc < bc_end && pc < bytecode_vec.len() {
+                if bytecode_vec[pc] == 40 || bytecode_vec[pc] == 41 {
+                    found = true;
+                    break;
+                }
+                pc += bitvm::instruction_size(&bytecode_vec, pc);
+            }
+            found
+        };
+        let use_pike = !info.has_backrefs && !has_lookahead_opcodes;
+
+        let bit_program = if use_pike && info.min_length > 0 && !info.has_lookahead {
+            bitvm::BitVmProgram::compile(&bytecode_vec)
+        } else {
+            None
+        };
+
+        Some(Regex {
+            bit_program,
+            bytecode: bytecode_ptr,
+            pattern: pattern.to_string(),
+            flags: final_flags,
+            strategy,
+            owned_bytecode: Some(bytecode_vec),
+            selective_prefilter: sel_prefilter,
+            use_pike_vm: use_pike,
+            ac_prefilter,
+            memmem_prefilter,
+            sub_patterns: Vec::new(),
+            sub_ac: None,
+            ac_to_sub: Vec::new(),
+        })
+    }
+
+    /// Extract prefilter literals from this regex's selective prefilter.
+    /// Only returns literals >= 2 bytes (single bytes generate too many AC false positives).
+    fn extract_prefilter_literals(&self) -> Vec<Vec<u8>> {
+        match &self.selective_prefilter {
+            selective::Prefilter::MemmemStart(needle)
+            | selective::Prefilter::MemmemInner { needle, .. } => {
+                if needle.len() >= 2 {
+                    vec![needle.clone()]
+                } else {
+                    Vec::new()
+                }
+            }
+            selective::Prefilter::AhoCorasickStart(patterns)
+            | selective::Prefilter::AhoCorasickInner { patterns, .. } => {
+                patterns.iter().filter(|p| p.len() >= 2).cloned().collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Count matches using decomposed sub-patterns.
+    /// Shared AC finds literal candidates, then each is verified with
+    /// the small sub-pattern Regex instead of the full combined Pike VM.
+    fn count_matches_decomposed(&self, text: &str) -> usize {
+        let ac = self.sub_ac.as_ref().unwrap();
+        let text_bytes = text.as_bytes();
+        let mut count = 0;
+        let mut pos = 0;
+
+        // Identify which sub-patterns have AC coverage
+        let mut has_literals = vec![false; self.sub_patterns.len()];
+        for &sub_idx in &self.ac_to_sub {
+            has_literals[sub_idx] = true;
+        }
+
+        // AC-based counting for sub-patterns with literals
+        while pos < text_bytes.len() {
+            let hit = match ac.find(&text_bytes[pos..]) {
+                Some(m) => m,
+                None => break,
+            };
+            let abs_pos = pos + hit.start();
+            let sub_idx = self.ac_to_sub[hit.pattern().as_usize()];
+            let sub_re = &self.sub_patterns[sub_idx];
+
+            // Determine backup based on sub-pattern's prefilter
+            let backup = match &sub_re.selective_prefilter {
+                selective::Prefilter::MemmemInner { min_prefix, .. }
+                | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => *min_prefix + 10,
+                _ => 10,
+            };
+            let forward = 300;
+
+            let window_start = abs_pos.saturating_sub(backup).max(pos);
+            let window_end = (abs_pos + forward).min(text_bytes.len());
+            let window = &text[window_start..window_end];
+
+            if let Some(m) = sub_re.find_at(window, 0) {
+                count += 1;
+                let abs_end = window_start + m.end;
+                pos = if abs_end > abs_pos { abs_end } else { abs_pos + 1 };
+                continue;
+            }
+            pos = abs_pos + 1;
+        }
+
+        // Full scan for sub-patterns without extractable literals
+        for (i, sub_re) in self.sub_patterns.iter().enumerate() {
+            if has_literals[i] {
+                continue;
+            }
+            count += sub_re.find_iter(text).count();
+        }
+
+        count
     }
 }
 
@@ -3500,7 +3784,10 @@ fn pattern_has_alternation(pattern: &str) -> bool {
 /// Otherwise extracts first bytes for memchr optimization
 fn analyze_alternation(pattern: &str, case_insensitive: bool) -> SearchStrategy {
     // First, try to extract all alternatives as pure literals
-    let alternatives: Vec<&str> = split_top_level_alternation(pattern);
+    let alternatives = match split_top_level_alternation(pattern) {
+        Some(alts) => alts,
+        None => return SearchStrategy::None,
+    };
 
     if alternatives.len() >= 2 {
         // Check if all alternatives are pure literals (ASCII only for case-insensitive)
@@ -3602,25 +3889,68 @@ fn analyze_alternation(pattern: &str, case_insensitive: bool) -> SearchStrategy 
     }
 }
 
-/// Split a pattern on top-level '|' (not inside groups)
-fn split_top_level_alternation(pattern: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
+/// Split a regex pattern at top-level `|` characters.
+/// Tracks parenthesis depth, character classes `[...]`, and escapes `\`.
+/// Returns None if the pattern has no top-level alternation.
+fn split_top_level_alternation(pattern: &str) -> Option<Vec<String>> {
+    let bytes = pattern.as_bytes();
+    let mut depth = 0i32;
+    let mut in_class = false;
+    let mut i = 0;
+    let mut segments: Vec<String> = Vec::new();
+    let mut seg_start = 0;
 
-    for (i, c) in pattern.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => { if depth > 0 { depth -= 1; } }
-            '|' if depth == 0 => {
-                result.push(&pattern[start..i]);
-                start = i + 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' {
+            // Skip escaped character
+            i += 2;
+            continue;
+        }
+        if in_class {
+            if b == b']' {
+                in_class = false;
             }
-            _ => {}
+            i += 1;
+            continue;
+        }
+        match b {
+            b'[' => {
+                in_class = true;
+                i += 1;
+                // Handle negation and ] as first char in class
+                if i < bytes.len() && bytes[i] == b'^' {
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == b']' {
+                    i += 1;
+                }
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+            }
+            b'|' if depth == 0 => {
+                segments.push(pattern[seg_start..i].to_string());
+                i += 1;
+                seg_start = i;
+            }
+            _ => {
+                i += 1;
+            }
         }
     }
-    result.push(&pattern[start..]);
-    result
+
+    if segments.is_empty() {
+        return None;
+    }
+    // Push the last segment
+    segments.push(pattern[seg_start..].to_string());
+    Some(segments)
 }
 
 /// Extract a pure literal from a simple pattern (no metacharacters)
