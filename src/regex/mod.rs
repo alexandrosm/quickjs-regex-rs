@@ -1701,68 +1701,35 @@ impl Regex {
     #[inline]
     /// Find using selective prefilter to skip to candidate positions.
     fn find_at_with_selective_prefilter(&self, text: &str, start: usize) -> Option<Match> {
+        // Pike VM has its own prefix loop — single call is enough
+        if self.use_pike_vm {
+            return self.try_match_at(text, start);
+        }
         let bytes = text.as_bytes();
         let mut search_from = start;
-
-        if self.use_pike_vm {
-            // For Pike VM: use prefilter to jump to candidates, then windowed exec.
-            // This avoids O(N×M) full-text scanning for patterns like noseyparker
-            // (96 alternations with \b on 7MB text: AC finds ~55 candidates vs
-            // Pike VM scanning every byte with 2000 NFA states).
-            use std::cell::RefCell;
-            thread_local! {
-                static PF_SCRATCH: RefCell<Option<pikevm::Scratch>> = RefCell::new(None);
-            }
-            let bytecode = self.bytecode_slice();
-            return PF_SCRATCH.with(|cell| {
-                let mut scratch_opt = cell.borrow_mut();
-                let scratch = scratch_opt.get_or_insert_with(|| self.create_scratch());
-
-                while search_from < bytes.len() {
-                    let remaining = &bytes[search_from..];
-                    let lit_pos = self.find_next_prefilter_candidate(remaining, search_from);
-                    let lit_pos = match lit_pos {
-                        Some(p) => p,
-                        None => break,
-                    };
-
-                    let try_pos = match &self.selective_prefilter {
-                        selective::Prefilter::MemmemInner { min_prefix, .. }
-                        | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => {
-                            lit_pos.saturating_sub(*min_prefix).max(start)
-                        }
-                        _ => lit_pos,
-                    };
-
-                    // Windowed exec: only scan near the candidate, not the whole text.
-                    // 500 bytes past the literal covers any realistic suffix length.
-                    let window_end = (lit_pos + 500).min(bytes.len());
-                    let vm = pikevm::PikeVm::new(bytecode, &bytes[..window_end]);
-                    match vm.exec_with_scratch(scratch, try_pos) {
-                        pikevm::PikeResult::Match(caps) => {
-                            let s = caps.get(0).copied().flatten()?;
-                            let e = caps.get(1).copied().flatten()?;
-                            if s >= start {
-                                return Some(Match { start: s, end: e });
-                            }
-                        }
-                        pikevm::PikeResult::NoMatch => {}
-                    }
-                    search_from = lit_pos + 1;
-                }
-                None
-            });
-        }
-
-        // Non-Pike VM path: backtracker with prefilter scanning
         while search_from <= text.len() {
+            // Find next literal occurrence
             let remaining = &bytes[search_from..];
-            let lit_pos = self.find_next_prefilter_candidate(remaining, search_from);
-            let lit_pos = match lit_pos {
-                Some(p) => p,
-                None => break,
+            let lit_pos = match &self.selective_prefilter {
+                selective::Prefilter::MemmemStart(_) | selective::Prefilter::MemmemInner { .. } => {
+                    self.memmem_prefilter.as_ref()
+                        .and_then(|f| f.find(remaining))
+                        .map(|i| search_from + i)
+                }
+                selective::Prefilter::AhoCorasickStart(_) | selective::Prefilter::AhoCorasickInner { .. } => {
+                    self.ac_prefilter.as_ref()
+                        .and_then(|ac| ac.find(remaining))
+                        .map(|m| search_from + m.start())
+                }
+                _ => None,
             };
 
+            let lit_pos = match lit_pos {
+                Some(p) => p,
+                None => break, // No more literal occurrences
+            };
+
+            // Calculate where to start trying the match
             let try_pos = match &self.selective_prefilter {
                 selective::Prefilter::MemmemInner { min_prefix, .. }
                 | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => {
@@ -1771,30 +1738,15 @@ impl Regex {
                 _ => lit_pos,
             };
 
+            // Try matching at the candidate position
             if let Some(m) = self.try_match_at(text, try_pos) {
                 return Some(m);
             }
+
+            // Failed — skip past this literal occurrence to find the next one
             search_from = lit_pos + 1;
         }
         None
-    }
-
-    /// Find next prefilter candidate position in remaining text.
-    #[inline]
-    fn find_next_prefilter_candidate(&self, remaining: &[u8], search_from: usize) -> Option<usize> {
-        match &self.selective_prefilter {
-            selective::Prefilter::MemmemStart(_) | selective::Prefilter::MemmemInner { .. } => {
-                self.memmem_prefilter.as_ref()
-                    .and_then(|f| f.find(remaining))
-                    .map(|i| search_from + i)
-            }
-            selective::Prefilter::AhoCorasickStart(_) | selective::Prefilter::AhoCorasickInner { .. } => {
-                self.ac_prefilter.as_ref()
-                    .and_then(|ac| ac.find(remaining))
-                    .map(|m| search_from + m.start())
-            }
-            _ => None,
-        }
     }
 
     fn find_at_linear(&self, text: &str, start: usize) -> Option<Match> {
@@ -2177,12 +2129,25 @@ impl Regex {
     }
 
     /// Count matches by jumping to prefilter candidates and running Pike VM nearby.
+    /// Two-stage filtering: AC prefilter → Wide NFA rejection → Pike VM confirm.
     fn count_matches_pike_prefiltered(&self, text: &str) -> usize {
         let text_bytes = text.as_bytes();
         let bytecode = self.bytecode_slice();
         let mut scratch = self.create_scratch();
         let mut count = 0;
         let mut search_from = 0;
+
+        // Use selective prefilter's min_prefix for backup (instead of fixed 200).
+        let min_prefix = match &self.selective_prefilter {
+            selective::Prefilter::MemmemInner { min_prefix, .. }
+            | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => *min_prefix,
+            _ => 0,
+        };
+        // Generous backup: min_prefix + 10 (for word boundary and small variations)
+        let backup = min_prefix + 10;
+        // Forward window: cover the longest possible match suffix.
+        // Most patterns are < 200 bytes. Use 300 for safety.
+        let forward = 300;
 
         while search_from < text_bytes.len() {
             let remaining = &text_bytes[search_from..];
@@ -2207,17 +2172,20 @@ impl Regex {
                 None => break, // No more candidates
             };
 
-            // Back up by max possible prefix before the literal.
-            // min_prefix is the pattern's min_length. The actual prefix before the
-            // literal can be larger (due to variable-length parts). Use 200 bytes
-            // as a practical maximum — covers most real-world patterns.
-            let backup = 200;
-            let try_pos = lit_pos.saturating_sub(backup);
-
-            // Window: backup before literal + 300 bytes after (for suffix after literal)
-            let window_start = try_pos;
-            let window_end = (lit_pos + 300).min(text_bytes.len());
+            let window_start = lit_pos.saturating_sub(backup);
+            let window_end = (lit_pos + forward).min(text_bytes.len());
             let window = &text_bytes[window_start..window_end];
+
+            // Stage 1: Wide NFA fast rejection (O(window × states/64)).
+            // Rejects ~99% of false AC candidates without Pike VM cost.
+            if let Some(ref prog) = self.bit_program {
+                if !prog.has_match(window) {
+                    search_from = lit_pos + 1;
+                    continue;
+                }
+            }
+
+            // Stage 2: Pike VM exec for exact match (captures, word boundaries).
             let vm = pikevm::PikeVm::new(bytecode, window);
             match vm.exec_with_scratch(&mut scratch, 0) {
                 pikevm::PikeResult::Match(caps) => {
@@ -2225,7 +2193,7 @@ impl Regex {
                     // Translate window-relative end back to absolute
                     let rel_end = caps.get(1).copied().flatten().unwrap_or(1);
                     let abs_end = window_start + rel_end;
-                    search_from = if abs_end > try_pos { abs_end } else { lit_pos + 1 };
+                    search_from = if abs_end > window_start { abs_end } else { lit_pos + 1 };
                 }
                 pikevm::PikeResult::NoMatch => {
                     search_from = lit_pos + 1;
