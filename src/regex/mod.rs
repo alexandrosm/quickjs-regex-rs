@@ -2119,9 +2119,8 @@ impl Regex {
     /// Count matches by jumping to prefilter candidates and running Pike VM nearby.
     fn count_matches_pike_prefiltered(&self, text: &str) -> usize {
         let text_bytes = text.as_bytes();
-        let bytecode = unsafe {
-            std::slice::from_raw_parts(self.bytecode, self.bytecode_len())
-        };
+        let bytecode = self.bytecode_slice();
+        let mut scratch = self.create_scratch();
         let mut count = 0;
         let mut search_from = 0;
 
@@ -2160,7 +2159,7 @@ impl Regex {
             let window_end = (lit_pos + 300).min(text_bytes.len());
             let window = &text_bytes[window_start..window_end];
             let vm = pikevm::PikeVm::new(bytecode, window);
-            match vm.exec(0) {
+            match vm.exec_with_scratch(&mut scratch, 0) {
                 pikevm::PikeResult::Match(caps) => {
                     count += 1;
                     // Translate window-relative end back to absolute
