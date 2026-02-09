@@ -2551,8 +2551,11 @@ impl Regex {
             return;
         }
 
+        // Use case-insensitive AC since many sub-patterns use (?i).
+        // Extra candidates for case-sensitive patterns are rejected by Pike VM.
         let sub_ac = AhoCorasickBuilder::new()
             .match_kind(MatchKind::LeftmostFirst)
+            .ascii_case_insensitive(true)
             .build(&all_ac_literals)
             .ok();
 
@@ -2735,18 +2738,23 @@ impl Regex {
             };
             let forward = 300;
 
-            let window_start = abs_pos.saturating_sub(backup).max(pos);
+            let try_start = abs_pos.saturating_sub(backup).max(pos);
             let window_end = (abs_pos + forward).min(text_bytes.len());
 
-            // Use Pike VM directly with per-sub-pattern scratch (avoids thread-local conflicts)
+            // Include 1 byte before try_start for \b word boundary context.
+            // The Pike VM needs the preceding character to correctly evaluate \b.
+            let ctx_start = if try_start > 0 { try_start - 1 } else { 0 };
+            let exec_offset = try_start - ctx_start;
+
+            // Use Pike VM directly with per-sub-pattern scratch
             let bytecode = sub_re.bytecode_slice();
-            let window_bytes = &text_bytes[window_start..window_end];
+            let window_bytes = &text_bytes[ctx_start..window_end];
             let vm = pikevm::PikeVm::new(bytecode, window_bytes);
-            match vm.exec_with_scratch(&mut scratches[sub_idx], 0) {
+            match vm.exec_with_scratch(&mut scratches[sub_idx], exec_offset) {
                 pikevm::PikeResult::Match(caps) => {
                     count += 1;
-                    let rel_end = caps.get(1).copied().flatten().unwrap_or(1);
-                    let abs_end = window_start + rel_end;
+                    let rel_end = caps.get(1).copied().flatten().unwrap_or(exec_offset + 1);
+                    let abs_end = ctx_start + rel_end;
                     pos = if abs_end > abs_pos { abs_end } else { abs_pos + 1 };
                 }
                 pikevm::PikeResult::NoMatch => {
