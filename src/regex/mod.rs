@@ -912,9 +912,9 @@ impl Regex {
 
         // Decompose large top-level alternations into sub-patterns.
         // Each branch gets its own small Regex for cheap per-candidate verification.
-        // Use original `flags` (not final_flags) so inline flags like (?i) from
-        // the first alternative don't leak to other alternatives.
-        regex.try_decompose_alternation(pattern, flags);
+        // Use final_flags so decomposition keeps the same effective global flags
+        // as the combined regex (e.g. a leading (?i) on the full pattern).
+        regex.try_decompose_alternation(pattern, final_flags);
 
         Ok(regex)
     }
