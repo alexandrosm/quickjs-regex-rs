@@ -2199,34 +2199,10 @@ impl Regex {
 
             let window_start = lit_pos.saturating_sub(backup);
 
-            // Stage 0: Word boundary pre-check (O(1)).
-            // Most noseyparker patterns require \b at the match start.
-            // If the AC literal is at the start of the match (AhoCorasickStart),
-            // check if there's a word boundary at lit_pos. This rejects 50-80%
-            // of candidates instantly (e.g., "user" inside "_user_name").
-            if matches!(self.selective_prefilter, selective::Prefilter::AhoCorasickStart(_)) {
-                let prev_is_word = lit_pos > 0 && is_word_char(text_bytes[lit_pos - 1]);
-                let curr_is_word = lit_pos < text_bytes.len() && is_word_char(text_bytes[lit_pos]);
-                // Most patterns require: \b at start → prev NOT word, curr IS word
-                // (or prev IS word, curr NOT word for end-of-word).
-                // If both are the same "wordness", there's no boundary → skip.
-                if prev_is_word == curr_is_word {
-                    search_from = lit_pos + 1;
-                    continue;
-                }
-            }
-
-            // Stage 1: Wide NFA fast rejection on SMALL window (100 bytes).
-            if let Some(ref prog) = self.bit_program {
-                let nfa_end = (lit_pos + 100).min(text_bytes.len());
-                let nfa_window = &text_bytes[window_start..nfa_end];
-                if !prog.has_match(nfa_window) {
-                    search_from = lit_pos + 1;
-                    continue;
-                }
-            }
-
-            // Stage 2: Pike VM exec on larger window for exact match.
+            // Pike VM exec on window for exact match.
+            // For 96 alternatives, exec adds ~96 initial threads per byte
+            // position. Most die immediately (wrong first byte). Average
+            // per-byte cost is ~106 ops, so 310-byte window ≈ 33K ops.
             let window_end = (lit_pos + forward).min(text_bytes.len());
             let window = &text_bytes[window_start..window_end];
             let vm = pikevm::PikeVm::new(bytecode, window);
