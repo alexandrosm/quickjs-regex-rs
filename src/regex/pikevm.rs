@@ -174,7 +174,7 @@ enum EpsFrame {
 /// Bytes that always trigger identical NFA transitions share a class.
 /// This reduces the transition table from 256 entries to ~20-50 entries per state,
 /// which means the DFA can cache 5-12× more states before overflow.
-const MAX_DFA_STATES: usize = 16384;
+const MAX_DFA_STATES: usize = 65536;
 
 /// Compute byte equivalence classes from bytecode.
 /// Bytes in the same class have identical behavior for all consuming states.
@@ -1506,6 +1506,10 @@ impl<'a> PikeScanner<'a> {
 
     /// Fallback uncached scan (for non-ASCII or DFA overflow)
     fn find_match_uncached_vm(vm: &PikeVm<'a>, start_pos: usize) -> Option<usize> {
+        // This is a static method (no &self) — can't reuse PikeScanner buffers.
+        // Called on DFA overflow. Uses vm.exec which allocates fresh ThreadLists.
+        // For patterns with many states (e.g., noseyparker): the allocation is
+        // expensive. Consider using exec_reuse if this is a hot path.
         match vm.exec(start_pos) {
             PikeResult::Match(caps) => caps.get(1).copied().flatten(),
             PikeResult::NoMatch => None,
