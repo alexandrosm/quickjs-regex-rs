@@ -351,9 +351,10 @@ impl LazyDfa {
     }
 
     /// Store a transition via byte class.
-    /// When has_assertions is true, DON'T cache (assertions are position-dependent).
+    /// Word boundary assertions depend on the NEXT byte (1-byte lookahead) which
+    /// is unknown at cache time. Can't cache for word boundary patterns.
     fn store(&mut self, state_id: u32, byte: u8, next_state_id: u32, has_assertions: bool) {
-        if has_assertions { return; } // Position-dependent: can't cache
+        if has_assertions { return; }
         let class = self.class_map[byte as usize] as usize;
         if let Some(t) = self.transitions.get_mut(state_id as usize) {
             if class < t.len() {
@@ -1249,9 +1250,8 @@ impl<'a> PikeScanner<'a> {
     /// For non-ASCII-heavy text or Unicode mode, uses exec_reuse directly
     /// (the DFA's per-non-ASCII-byte overhead makes it slower than raw exec).
     pub fn count_all(&mut self) -> usize {
-        // Use exec_reuse directly (skip DFA) when:
-        // - Word boundary assertions: DFA can't cache (position-dependent)
-        // - Non-ASCII text with Unicode mode: DFA has per-byte HashMap overhead
+        // Skip DFA for word boundary patterns (can't cache due to 1-byte lookahead)
+        // and for non-ASCII Unicode text (DFA has per-byte overhead).
         let has_wb = match &self.dfa {
             DfaStorage::Owned(dfa) => dfa.has_word_boundary,
             DfaStorage::Borrowed(cell) => cell.borrow().has_word_boundary,
