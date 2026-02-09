@@ -142,6 +142,17 @@ mod tests {
     }
 
     #[test]
+    fn test_negated_builtin_class() {
+        assert!(compile_and_match("[^\\s]+", Flags::empty(), "token"));
+        assert!(!compile_and_match("^[^\\s]+$", Flags::empty(), "has space"));
+        assert!(compile_and_match(
+            r"(?:(machine\s+[^\s]+)|default)\s+login\s+([^\s]+)\s+password\s+([^\s]+)",
+            Flags::empty(),
+            "default login alice password secret",
+        ));
+    }
+
+    #[test]
     fn test_find_position() {
         let m = compile_and_find("world", Flags::empty(), "hello world");
         assert_eq!(m, Some((6, 11)));

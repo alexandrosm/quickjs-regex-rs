@@ -2584,7 +2584,6 @@ impl Regex {
                     literals = lits;
                 }
             }
-
             for lit in &literals {
                 let key = lit.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>();
                 let entry = literal_to_subs.entry(key).or_default();
@@ -2630,6 +2629,7 @@ impl Regex {
 
     /// Extract literal strings from AST analysis for a sub-pattern.
     /// Uses required_literals (must appear in any match) and possible_literals.
+    /// Keep literals relatively long to avoid excessive AC false positives.
     fn extract_literals_from_ast(pattern: &str, flags: Flags) -> Option<Vec<Vec<u8>>> {
         let (processed, extracted_flags) = extract_inline_flags(pattern);
         let mut final_flags = flags;
@@ -2642,13 +2642,13 @@ impl Regex {
         // Keep a small set of literals to improve recall when one literal choice
         // is poor for a particular haystack.
         let mut lits: Vec<Vec<u8>> = info.required_literals.iter()
-            .filter(|s| s.len() >= 2)
+            .filter(|s| s.len() >= 4)
             .map(|s| s.as_bytes().to_vec())
             .collect();
 
         lits.extend(
             info.possible_literals.iter()
-                .filter(|s| s.len() >= 2)
+                .filter(|s| s.len() >= 4)
                 .map(|s| s.as_bytes().to_vec())
         );
 
@@ -2658,8 +2658,8 @@ impl Regex {
 
         lits.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         lits.dedup();
-        if lits.len() > 16 {
-            lits.truncate(16);
+        if lits.len() > 8 {
+            lits.truncate(8);
         }
         Some(lits)
     }
@@ -2744,12 +2744,12 @@ impl Regex {
     }
 
     /// Extract prefilter literals from this regex's selective prefilter.
-    /// Only returns literals >= 2 bytes (single bytes generate too many AC false positives).
+    /// Only returns literals >= 4 bytes (short literals generate too many AC false positives).
     fn extract_prefilter_literals(&self) -> Vec<Vec<u8>> {
         match &self.selective_prefilter {
             selective::Prefilter::MemmemStart(needle)
             | selective::Prefilter::MemmemInner { needle, .. } => {
-                if needle.len() >= 2 {
+                if needle.len() >= 4 {
                     vec![needle.clone()]
                 } else {
                     Vec::new()
@@ -2757,7 +2757,7 @@ impl Regex {
             }
             selective::Prefilter::AhoCorasickStart(patterns)
             | selective::Prefilter::AhoCorasickInner { patterns, .. } => {
-                patterns.iter().filter(|p| p.len() >= 2).cloned().collect()
+                patterns.iter().filter(|p| p.len() >= 4).cloned().collect()
             }
             _ => Vec::new(),
         }
@@ -2771,16 +2771,6 @@ impl Regex {
         let text_bytes = text.as_bytes();
         let mut count = 0;
         let mut pos = 0;
-
-        // Identify which sub-patterns have AC coverage
-        let mut has_literals = vec![false; self.sub_patterns.len()];
-        for sub_idxs in &self.ac_to_sub {
-            for &sub_idx in sub_idxs {
-                if sub_idx < has_literals.len() {
-                    has_literals[sub_idx] = true;
-                }
-            }
-        }
 
         // Pre-create per-sub-pattern scratches to avoid thread-local conflicts
         let mut scratches: Vec<pikevm::Scratch> = self.sub_patterns.iter()
@@ -2806,10 +2796,10 @@ impl Regex {
                     | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => *min_prefix + 10,
                     _ => 10,
                 };
-                // AST-derived literals can be far from match start (e.g. after .{0,100}),
-                // so keep a larger minimum backup for decomposed verification windows.
-                let backup = backup.max(128);
-                let forward = 300;
+                // Keep a moderate minimum backup for inner literals without exploding
+                // per-candidate verification cost on large haystacks.
+                let backup = backup.max(48);
+                let forward = 256;
 
                 let try_start = abs_pos.saturating_sub(backup).max(pos);
                 let window_end = (abs_pos + forward).min(text_bytes.len());
@@ -2837,14 +2827,6 @@ impl Regex {
             if !matched {
                 pos = abs_pos + 1;
             }
-        }
-
-        // Full scan for sub-patterns without extractable literals
-        for (i, sub_re) in self.sub_patterns.iter().enumerate() {
-            if has_literals[i] {
-                continue;
-            }
-            count += sub_re.find_iter(text).count();
         }
 
         count

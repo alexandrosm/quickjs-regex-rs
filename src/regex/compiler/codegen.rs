@@ -196,10 +196,22 @@ impl CodeGenerator {
         Ok(())
     }
 
-    fn compile_class_with_builtins(&mut self, ranges: &[ClassRange], _negated: bool) -> Result<()> {
+    fn compile_class_with_builtins(&mut self, ranges: &[ClassRange], negated: bool) -> Result<()> {
         // Emit as alternation of individual items
         let items: Vec<&ClassRange> = ranges.iter().collect();
         if items.len() == 1 {
+            if negated {
+                if let ClassRange::Builtin(cls) = items[0] {
+                    return self.compile_builtin(match cls {
+                        BuiltinClass::Space => BuiltinClass::NotSpace,
+                        BuiltinClass::NotSpace => BuiltinClass::Space,
+                        BuiltinClass::Digit => BuiltinClass::NotDigit,
+                        BuiltinClass::NotDigit => BuiltinClass::Digit,
+                        BuiltinClass::Word => BuiltinClass::NotWord,
+                        BuiltinClass::NotWord => BuiltinClass::Word,
+                    });
+                }
+            }
             return self.compile_class_item(&items[0]);
         }
 
