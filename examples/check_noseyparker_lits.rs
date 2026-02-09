@@ -132,12 +132,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if per_pattern {
             let mut nonzero = Vec::new();
+            let mut find_nonzero = Vec::new();
+            let mut mismatched = Vec::new();
             for (i, pat) in patterns.iter().enumerate() {
                 match Regex::new(pat) {
                     Ok(sub) => {
                         let c = sub.count_matches(&hay);
+                        let fi = sub.find_iter(&hay).count();
                         if c > 0 {
                             nonzero.push((i, c, pat.clone()));
+                        }
+                        if fi > 0 {
+                            find_nonzero.push((i, fi, pat.clone()));
+                        }
+                        if c != fi {
+                            mismatched.push((i, c, fi, pat.clone()));
                         }
                     }
                     Err(err) => {
@@ -146,8 +155,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
             println!("per_pattern_nonzero={}", nonzero.len());
+            println!("per_pattern_find_iter_nonzero={}", find_nonzero.len());
+            println!("per_pattern_mismatched={}", mismatched.len());
             for (i, c, pat) in nonzero.iter().take(20) {
                 println!("  idx={} count={} pat={}", i, c, pat);
+            }
+            for (i, c, fi, pat) in mismatched.iter().take(20) {
+                println!("  mismatch idx={} count={} find_iter={} pat={}", i, c, fi, pat);
             }
         }
 
