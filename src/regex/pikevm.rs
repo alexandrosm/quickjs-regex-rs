@@ -1528,6 +1528,7 @@ impl<'a> PikeScanner<'a> {
 }
 
 #[inline] fn is_word_char_at(input: &[u8], pos: usize, unicode: bool) -> bool {
+    if pos >= input.len() { return false; }
     let b = input[pos];
     if b < 0x80 { return b.is_ascii_alphanumeric() || b == b'_'; }
     // Non-ASCII: in non-Unicode mode, non-ASCII bytes are never word chars.
