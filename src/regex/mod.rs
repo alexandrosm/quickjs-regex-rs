@@ -2777,6 +2777,9 @@ impl Regex {
                 | selective::Prefilter::AhoCorasickInner { min_prefix, .. } => *min_prefix + 10,
                 _ => 10,
             };
+            // AST-derived literals can be far from match start (e.g. after .{0,100}),
+            // so keep a larger minimum backup for decomposed verification windows.
+            let backup = backup.max(128);
             let forward = 300;
 
             let try_start = abs_pos.saturating_sub(backup).max(pos);
