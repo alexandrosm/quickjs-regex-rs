@@ -52,6 +52,7 @@ fn parse_patterns_from_file(path: &str) -> Result<Vec<String>, Box<dyn Error>> {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut pattern_file: Option<String> = None;
     let mut haystack_file: Option<String> = None;
+    let mut per_pattern = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -63,11 +64,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let val = args.next().ok_or("missing value for --haystack")?;
                 haystack_file = Some(val);
             }
+            "--per-pattern" => {
+                per_pattern = true;
+            }
             "--help" | "-h" => {
                 println!("Usage:");
                 println!("  cargo run --release --example check_noseyparker_lits");
                 println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file>");
                 println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file> --haystack <file>");
+                println!("  cargo run --release --example check_noseyparker_lits -- --patterns <file> --haystack <file> --per-pattern");
                 return Ok(());
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -114,6 +119,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(path) = haystack_file.as_deref() {
         let hay_bytes = fs::read(path)?;
         let hay = String::from_utf8_lossy(&hay_bytes);
+
+        if per_pattern {
+            let mut nonzero = Vec::new();
+            for (i, pat) in patterns.iter().enumerate() {
+                match Regex::new(pat) {
+                    Ok(sub) => {
+                        let c = sub.count_matches(&hay);
+                        if c > 0 {
+                            nonzero.push((i, c, pat.clone()));
+                        }
+                    }
+                    Err(err) => {
+                        println!("pattern_compile_error index={} err={}", i, err);
+                    }
+                }
+            }
+            println!("per_pattern_nonzero={}", nonzero.len());
+            for (i, c, pat) in nonzero.iter().take(20) {
+                println!("  idx={} count={} pat={}", i, c, pat);
+            }
+        }
+
         let start = Instant::now();
         let count = re.count_matches(&hay);
         let elapsed = start.elapsed();
