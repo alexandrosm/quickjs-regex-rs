@@ -2517,9 +2517,9 @@ impl Regex {
 
         for (i, alt) in alts.iter().enumerate() {
             // Compile each branch as an independent regex.
-            // Wrap in (?:...) to preserve grouping semantics.
-            let sub_pattern = format!("(?:{})", alt);
-            let sub_re = match Regex::compile_sub_pattern(&sub_pattern, flags) {
+            // Don't wrap in (?:...) — inline flags like (?i) at the start
+            // need to be visible to extract_inline_flags.
+            let sub_re = match Regex::compile_sub_pattern(alt, flags) {
                 Some(r) => r,
                 None => {
                     // If any branch fails to compile, abort decomposition
@@ -2533,7 +2533,7 @@ impl Regex {
             // If selective prefilter didn't yield good AC literals (>= 2 bytes),
             // try to extract from required_literals via fresh AST analysis.
             if literals.is_empty() {
-                if let Some(lits) = Self::extract_literals_from_ast(&sub_pattern, flags) {
+                if let Some(lits) = Self::extract_literals_from_ast(alt, flags) {
                     literals = lits;
                 }
             }
