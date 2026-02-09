@@ -114,12 +114,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(path) = haystack_file.as_deref() {
         let hay_bytes = fs::read(path)?;
         let hay = String::from_utf8_lossy(&hay_bytes);
-        let first = re.find(&hay);
-        println!(
-            "first_match={}",
-            first.map(|m| format!("{}..{}", m.start, m.end)).unwrap_or_else(|| "none".to_string())
-        );
-        println!("find_iter_first_count={}", re.find_iter(&hay).take(1).count());
         let start = Instant::now();
         let count = re.count_matches(&hay);
         let elapsed = start.elapsed();
